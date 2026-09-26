@@ -1,15 +1,19 @@
 package me.tianhangj.quickenchant.gui;
 
 import me.tianhangj.quickenchant.automation.EnchantAutomation;
+import me.tianhangj.quickenchant.automation.PrepareFlow;
 import me.tianhangj.quickenchant.command.ClientCommandHelper;
+import me.tianhangj.quickenchant.config.FlowState;
 import me.tianhangj.quickenchant.inventory.InventoryScanner;
 import me.tianhangj.quickenchant.predicate.EnchantPredicate;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.core.Holder;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.Identifier;
 import net.minecraft.tags.EnchantmentTags;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
@@ -24,9 +28,9 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * The enchantment selection screen. Top: item type selector (identical items merged and shown as
- * "name*count"). Then the "exactly" toggle and a list of enchantment/level rows, mirroring
- * clientcommands' /cenchant predicate semantics.
+ * Step 2 of the prepare flow: per-item-type enchantment selection. Identical items are merged
+ * ("name*count"); selections are prefilled from the persisted per-item-id config so the same
+ * item id keeps its previously chosen parameters.
  */
 public class EnchantSelectScreen extends Screen {
     private static final int ANY_LEVEL = EnchantPredicate.Row.ANY_LEVEL;
@@ -48,23 +52,66 @@ public class EnchantSelectScreen extends Screen {
     private final List<TypeEntry> types = new ArrayList<>();
     private final Map<Item, TypeState> states = new HashMap<>();
     private final @Nullable Screen parent;
+    private final List<Integer> selectedSlots;
+    private boolean typesBuilt = false;
     private int selected = 0;
 
-    public EnchantSelectScreen(InventoryScanner.Snapshot snapshot, @Nullable Screen parent) {
-        super(Component.translatable("quick-enchant.gui.title"));
+    public EnchantSelectScreen(List<Integer> selectedSlots, @Nullable Screen parent) {
+        super(Component.translatable("quick-enchant.flow.enchantTitle"));
         this.parent = parent;
+        this.selectedSlots = selectedSlots;
+    }
+
+    /** Built on first init: this.minecraft is only injected when the screen is initialized. */
+    private void buildTypes() {
         Map<Item, Integer> counts = new LinkedHashMap<>();
-        for (InventoryScanner.BoxInfo box : snapshot.itemBoxes()) {
-            for (ItemStack stack : box.contents()) {
-                if (InventoryScanner.isEnchantableCandidate(stack)) {
-                    counts.merge(stack.getItem(), stack.getCount(), Integer::sum);
+        if (this.minecraft != null && this.minecraft.player != null) {
+            for (int invSlot : selectedSlots) {
+                ItemStack boxStack = this.minecraft.player.getInventory().getItem(invSlot);
+                if (!InventoryScanner.isShulkerBox(boxStack)) {
+                    continue;
+                }
+                for (ItemStack stack : InventoryScanner.readBoxContents(boxStack)) {
+                    if (InventoryScanner.isEnchantableCandidate(stack)) {
+                        counts.merge(stack.getItem(), stack.getCount(), Integer::sum);
+                    }
                 }
             }
         }
         counts.forEach((item, count) -> {
             types.add(new TypeEntry(item, count));
-            states.put(item, new TypeState());
+            states.put(item, prefill(item));
         });
+    }
+
+    /** Prefill this item's state from the persisted per-id config, if any. */
+    private TypeState prefill(Item item) {
+        TypeState state = new TypeState();
+        FlowState.StoredEnchantConfig stored = FlowState.enchantConfigs.get(idOf(item));
+        if (stored == null || this.minecraft == null || this.minecraft.player == null) {
+            return state;
+        }
+        state.exactly = stored.exactly();
+        var registry = this.minecraft.player.registryAccess().lookupOrThrow(Registries.ENCHANTMENT);
+        for (FlowState.StoredRow row : stored.rows()) {
+            RowDraft draft = new RowDraft();
+            try {
+                draft.mode = "WITHOUT".equals(row.mode()) ? EnchantPredicate.Mode.WITHOUT : EnchantPredicate.Mode.WITH;
+                Identifier enchId = Identifier.parse(row.ench());
+                registry.get(enchId).ifPresent(ref -> draft.enchantment = ref);
+                draft.level = row.level();
+            } catch (Exception ignored) {
+                draft.enchantment = null;
+            }
+            if (draft.enchantment != null) {
+                state.rows.add(draft);
+            }
+        }
+        return state;
+    }
+
+    private static String idOf(Item item) {
+        return BuiltInRegistries.ITEM.getKey(item).toString();
     }
 
     private TypeState state() {
@@ -89,6 +136,10 @@ public class EnchantSelectScreen extends Screen {
 
     @Override
     protected void init() {
+        if (!typesBuilt) {
+            typesBuilt = true;
+            buildTypes();
+        }
         int centerX = this.width / 2;
         int y = 30;
 
@@ -166,7 +217,7 @@ public class EnchantSelectScreen extends Screen {
             }
         }).bounds(centerX - 100, this.height - 52, 80, 20).build());
 
-        // confirm (arm; execution starts on the configured confirm hotkey)
+        // confirm (persist + advance the flow to the crack step)
         addRenderableWidget(Button.builder(Component.translatable("quick-enchant.gui.confirm"), b -> confirm()).bounds(centerX - 16, this.height - 52, 100, 20).build());
         // cancel
         addRenderableWidget(Button.builder(Component.translatable("gui.cancel"), b -> onClose()).bounds(centerX + 88, this.height - 52, 60, 20).build());
@@ -188,14 +239,29 @@ public class EnchantSelectScreen extends Screen {
             }
             if (!predicate.isEmpty()) {
                 configs.add(new EnchantAutomation.TypeConfig(entry.item(), predicate));
+                // persist for the same item id next time
+                List<FlowState.StoredRow> storedRows = new ArrayList<>();
+                for (RowDraft row : ts.rows) {
+                    if (row.enchantment != null) {
+                        storedRows.add(new FlowState.StoredRow(
+                                row.mode.name(),
+                                row.enchantment.unwrapKey()
+                                        .map(key -> key.identifier().toString())
+                                        .orElse(""),
+                                row.level));
+                    }
+                }
+                FlowState.enchantConfigs.put(idOf(entry.item()),
+                        new FlowState.StoredEnchantConfig(ts.exactly, storedRows));
             }
         }
         if (configs.isEmpty()) {
             return;
         }
-        EnchantAutomation.setPending(configs);
-        String hotkey = me.tianhangj.quickenchant.config.ModConfig.Generic.CONFIRM_EXECUTE.getKeybind().getKeysDisplayString();
-        ClientCommandHelper.sendFeedback(Component.translatable("quick-enchant.gui.armed", hotkey).withStyle(ChatFormatting.YELLOW));
+        FlowState.save();
+        PrepareFlow.confirmEnchants(configs);
+        ClientCommandHelper.sendFeedback(Component.translatable("quick-enchant.flow.enchantsConfirmed")
+                .withStyle(ChatFormatting.YELLOW));
         onClose();
     }
 

@@ -96,6 +96,8 @@ public class EnchantAutomation extends LongTask {
     private int boxSlot = -1;
     private int itemInvSlot = -1;
     private @Nullable ItemThrowTask throwTask;
+    private final List<Integer> selectedSlots = new ArrayList<>();
+    private boolean completedNormally = false;
 
     /**
      * Round-trip fence for container closes: the server processes ServerboundContainerClosePacket
@@ -113,7 +115,6 @@ public class EnchantAutomation extends LongTask {
     private boolean droppingDummy = false;
 
     private static @Nullable EnchantAutomation running = null;
-    private static @Nullable List<TypeConfig> pending = null;
 
     static {
         // the dummy drop has no ItemThrowTask listening, so the engine itself marks its
@@ -133,69 +134,57 @@ public class EnchantAutomation extends LongTask {
         return running;
     }
 
-    /** Store the GUI selection; execution starts on the confirm hotkey. */
-    public static void setPending(List<TypeConfig> configs) {
-        pending = configs;
-    }
-
-    public static boolean hasPending() {
-        return pending != null && !pending.isEmpty();
-    }
-
-    public static void clearPending() {
-        pending = null;
-    }
-
-    /** Called by the confirm hotkey: starts the armed plan. */
-    public static boolean startPending() {
-        if (pending == null || pending.isEmpty()) {
-            return false;
-        }
-        List<TypeConfig> configs = pending;
-        pending = null;
-        return armAndStart(configs);
-    }
-
-    public static boolean armAndStart(List<TypeConfig> configs) {
+    /** /qestart: starts the automation with the boxes and enchantments confirmed in /qeprepare. */
+    public static void beginRun(List<Integer> selectedSlots, List<TypeConfig> configs) {
         Minecraft mc = Minecraft.getInstance();
         LocalPlayer player = mc.player;
         if (player == null || mc.level == null || running != null) {
-            return false;
+            return;
         }
         if (Configs.enchCrackState != EnchantmentCracker.CrackState.CRACKED || !Configs.playerCrackState.knowsSeed()) {
             ClientCommandHelper.sendError(Component.translatable("quick-enchant.run.notCracked"));
-            return false;
+            return;
         }
         if (EnchantmentCracker.enchantingTablePos == null) {
             ClientCommandHelper.sendError(Component.translatable("quick-enchant.run.noTable"));
-            return false;
+            return;
         }
 
-        EnchantAutomation automation = new EnchantAutomation(configs);
+        EnchantAutomation automation = new EnchantAutomation(configs, selectedSlots);
         if (!automation.buildQueue(player)) {
             ClientCommandHelper.sendError(Component.translatable("quick-enchant.run.noItems"));
-            return false;
+            return;
         }
-        String taskName;
         try {
-            taskName = TaskManager.addTask("enchantAutomation", automation);
+            TaskManager.addTask("enchantAutomation", automation);
         } catch (Exception e) {
             ClientCommandHelper.sendError(Component.translatable("quick-enchant.run.conflict"));
-            return false;
+            return;
         }
         EnchantmentCracker.attachAutomationTask(automation);
         running = automation;
+        PrepareFlow.beginRun();
+
+        // crash-safe: persist the run as "not ended normally" together with the box selection,
+        // so the next /qeprepare inherits it unless this run finishes cleanly
+        me.tianhangj.quickenchant.config.FlowState.lastRunNormalEnd = false;
+        me.tianhangj.quickenchant.config.FlowState.selectedBoxes.clear();
+        me.tianhangj.quickenchant.config.FlowState.selectedBoxes.addAll(selectedSlots);
+        me.tianhangj.quickenchant.config.FlowState.save();
+
         ClientCommandHelper.sendFeedback(Component.translatable("quick-enchant.run.started", automation.queue.size()));
-        return true;
     }
 
-    /** Flatten the configured types into a per-item execution queue. */
+    /** Flatten the configured types into a per-item execution queue, counting only the selected boxes. */
     private boolean buildQueue(LocalPlayer player) {
-        InventoryScanner.Snapshot snapshot = InventoryScanner.scan(player);
         for (TypeConfig config : configs) {
             int count = 0;
-            for (InventoryScanner.BoxInfo box : snapshot.itemBoxes()) {
-                for (ItemStack stack : box.contents()) {
+            for (int invSlot : selectedSlots) {
+                ItemStack boxStack = player.getInventory().getItem(invSlot);
+                if (!InventoryScanner.isShulkerBox(boxStack)) {
+                    continue;
+                }
+                for (ItemStack stack : InventoryScanner.readBoxContents(boxStack)) {
                     if (stack.is(config.item()) && InventoryScanner.isEnchantableCandidate(stack)) {
                         count += stack.getCount();
                     }
@@ -221,8 +210,9 @@ public class EnchantAutomation extends LongTask {
         }
     }
 
-    private EnchantAutomation(List<TypeConfig> configs) {
+    private EnchantAutomation(List<TypeConfig> configs, List<Integer> selectedSlots) {
         this.configs = configs;
+        this.selectedSlots.addAll(selectedSlots);
         Item parsed = Items.AIR;
         try {
             parsed = BuiltInRegistries.ITEM.get(Identifier.parse(ModConfig.Generic.DUMMY_ITEM.getStringValue().trim()))
@@ -276,6 +266,14 @@ public class EnchantAutomation extends LongTask {
         closeFence = null;
         running = null;
         phase = Phase.DONE;
+
+        // the box selection is inherited by the next /qeprepare only when this run ended abnormally
+        me.tianhangj.quickenchant.config.FlowState.lastRunNormalEnd = completedNormally;
+        if (completedNormally) {
+            me.tianhangj.quickenchant.config.FlowState.selectedBoxes.clear();
+        }
+        me.tianhangj.quickenchant.config.FlowState.save();
+        PrepareFlow.endRun();
     }
 
     @Override
@@ -386,12 +384,16 @@ public class EnchantAutomation extends LongTask {
             return;
         }
 
-        InventoryScanner.Snapshot snapshot = InventoryScanner.scan(player);
         boxSlot = -1;
-        for (InventoryScanner.BoxInfo box : snapshot.itemBoxes()) {
-            boolean contains = box.contents().stream().anyMatch(s -> s.is(item) && InventoryScanner.isEnchantableCandidate(s));
+        for (int invSlot : selectedSlots) {
+            ItemStack boxStack = player.getInventory().getItem(invSlot);
+            if (!InventoryScanner.isShulkerBox(boxStack)) {
+                continue;
+            }
+            boolean contains = InventoryScanner.readBoxContents(boxStack).stream()
+                    .anyMatch(s -> s.is(item) && InventoryScanner.isEnchantableCandidate(s));
             if (contains) {
-                boxSlot = box.invSlot();
+                boxSlot = invSlot;
                 break;
             }
         }
@@ -1011,6 +1013,7 @@ public class EnchantAutomation extends LongTask {
 
     private void finish(boolean success) {
         if (success) {
+            completedNormally = true;
             ClientCommandHelper.sendFeedback(Component.translatable("quick-enchant.run.done").withStyle(ChatFormatting.GREEN));
         }
         cleanup();
@@ -1069,6 +1072,18 @@ public class EnchantAutomation extends LongTask {
             }
         }
         return -1;
+    }
+
+    public int statusCurrentIndex() {
+        return queueIndex;
+    }
+
+    public int statusQueueSize() {
+        return queue.size();
+    }
+
+    public String statusPhase() {
+        return phase.name();
     }
 
     @Override

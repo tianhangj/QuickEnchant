@@ -138,5 +138,25 @@
 	"quick-enchant.run.bookshelfMismatch": "书架数量不符：实际 %s，需要 %s（讲台调整已关闭或未记录讲台位置）。",
 	"quick-enchant.run.verifyFailed": "附魔台显示的附魔与预测不同！自动化已终止。",
 	"quick-enchant.run.enchantMismatch": "附魔结果与预测不符！自动化已终止。",
-	"quick-enchant.run.phase": "（阶段 %s）"
+	"quick-enchant.run.phase": "（阶段 %s）",
+	"quick-enchant.run.needWorld": "请先进入世界。",
+
+	"quick-enchant.flow.boxTitle": "1/3 选择待附魔物品盒",
+	"quick-enchant.flow.boxHint": "Shift+左键 标记/取消标记（仅含可附魔物品的潜影盒可标记）",
+	"quick-enchant.flow.confirmBoxes": "确认选择",
+	"quick-enchant.flow.enchantTitle": "2/3 选择附魔",
+	"quick-enchant.flow.enchantsConfirmed": "配置已保存。按右上角提示破解随机数，然后 /qestart 开始。",
+	"quick-enchant.flow.inherited": "已继承上次未正常结束的盒子选择。",
+	"quick-enchant.flow.prepared": "已打开待附魔盒选择界面。",
+	"quick-enchant.flow.notPrepared": "请先使用 /qeprepare 完成配置。",
+	"quick-enchant.flow.hintStageBoxes": "1/3 选择待附魔物品盒（/qeprepare）",
+	"quick-enchant.flow.hintStageEnchants": "2/3 选择附魔",
+	"quick-enchant.flow.hintCrackRng": "3/3 使用 /qecrackrng 破解玩家随机数",
+	"quick-enchant.flow.hintXpSeed": "在附魔台附魔任意物品，破解附魔种子",
+	"quick-enchant.flow.hintReady": "使用 /qestart 开始自动附魔",
+	"quick-enchant.flow.statusPlayerRng": "玩家RNG: %s",
+	"quick-enchant.flow.statusXpSeed": "附魔种子: %s",
+	"quick-enchant.flow.statusCracked": "已破解",
+	"quick-enchant.flow.statusUncracked": "未破解",
+	"quick-enchant.flow.statusRunning": "自动附魔中 第 %s/%s 件"
 }

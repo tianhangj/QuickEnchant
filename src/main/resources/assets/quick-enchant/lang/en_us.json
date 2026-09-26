@@ -138,5 +138,25 @@
 	"quick-enchant.run.bookshelfMismatch": "Bookshelf count mismatch: actual %s, needed %s (lectern adjustment disabled or no lectern recorded).",
 	"quick-enchant.run.verifyFailed": "The table offers different enchantments than predicted! Automation terminated.",
 	"quick-enchant.run.enchantMismatch": "The enchanted item does not match the prediction! Automation terminated.",
-	"quick-enchant.run.phase": "(phase %s)"
+	"quick-enchant.run.phase": "(phase %s)",
+	"quick-enchant.run.needWorld": "Join a world first.",
+
+	"quick-enchant.flow.boxTitle": "1/3 Select Item Boxes",
+	"quick-enchant.flow.boxHint": "Shift+Left-click to mark/unmark (only boxes with enchantable items)",
+	"quick-enchant.flow.confirmBoxes": "Confirm",
+	"quick-enchant.flow.enchantTitle": "2/3 Select Enchantments",
+	"quick-enchant.flow.enchantsConfirmed": "Setup saved. Crack the RNG following the hints, then /qestart.",
+	"quick-enchant.flow.inherited": "Inherited the box selection from the last unfinished run.",
+	"quick-enchant.flow.prepared": "Box selection opened.",
+	"quick-enchant.flow.notPrepared": "Run /qeprepare first.",
+	"quick-enchant.flow.hintStageBoxes": "1/3 Select item boxes (/qeprepare)",
+	"quick-enchant.flow.hintStageEnchants": "2/3 Select enchantments",
+	"quick-enchant.flow.hintCrackRng": "3/3 Run /qecrackrng to crack the player RNG",
+	"quick-enchant.flow.hintXpSeed": "Enchant any item in the table to crack the enchantment seed",
+	"quick-enchant.flow.hintReady": "Use /qestart to start the automation",
+	"quick-enchant.flow.statusPlayerRng": "Player RNG: %s",
+	"quick-enchant.flow.statusXpSeed": "XP seed: %s",
+	"quick-enchant.flow.statusCracked": "cracked",
+	"quick-enchant.flow.statusUncracked": "uncracked",
+	"quick-enchant.flow.statusRunning": "Running item %s/%s"
 }
