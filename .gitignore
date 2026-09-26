@@ -1,0 +1,60 @@
+# gradle
+
+.gradle/
+build/
+out/
+classes/
+
+# eclipse
+
+*.launch
+
+# idea
+
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# vscode
+
+.settings/
+.vscode/
+bin/
+.classpath
+.project
+
+# macos
+
+*.DS_Store
+
+# fabric
+
+run/
+
+# java
+
+hs_err_*.log
+replay_*.log
+*.hprof
+*.jfr
+
+# reference
+reference/
+
+# local test mods & dev runtime data
+mods/
+.fabric/
+
+# assistant session data
+.zcode/
+
+# logs
+*.log
+game-logs/
+
+# dev build counter (incremented automatically on every build)
+dev-build-number.txt
+
+# assistant local config
+.zcodeignore

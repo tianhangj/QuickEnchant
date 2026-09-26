@@ -1,0 +1,1078 @@
+package me.tianhangj.quickenchant.automation;
+
+import me.tianhangj.quickenchant.Configs;
+import me.tianhangj.quickenchant.QuickEnchant;
+import me.tianhangj.quickenchant.command.ClientCommandHelper;
+import me.tianhangj.quickenchant.config.ModConfig;
+import me.tianhangj.quickenchant.features.EnchantmentCracker;
+import me.tianhangj.quickenchant.features.PlayerRandCracker;
+import me.tianhangj.quickenchant.features.SuggestionsHook;
+import me.tianhangj.quickenchant.inventory.BoxOps;
+import me.tianhangj.quickenchant.inventory.InventoryScanner;
+import me.tianhangj.quickenchant.predicate.EnchantPredicate;
+import me.tianhangj.quickenchant.task.ItemThrowTask;
+import me.tianhangj.quickenchant.task.LongTask;
+import me.tianhangj.quickenchant.task.TaskManager;
+import net.minecraft.ChatFormatting;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.network.chat.Component;
+import net.minecraft.resources.Identifier;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.inventory.ContainerInput;
+import net.minecraft.world.inventory.EnchantmentMenu;
+import net.minecraft.world.inventory.LecternMenu;
+import net.minecraft.world.inventory.Slot;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.item.enchantment.EnchantmentInstance;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.Vec3;
+import org.jspecify.annotations.Nullable;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+
+/**
+ * The automation engine: one LongTask driving a per-item state machine.
+ * Per item: solve the plan, take the item out of its box, throw whitelist items to advance the
+ * RNG, adjust the lectern bookshelf count, enchant with in-table verification, and return the
+ * item to its original box.
+ *
+ * <p>When the current table seed does not already offer the target, a dummy enchant is performed
+ * on a separate configurable item (the vanilla table server-side refuses to enchant items that
+ * already carry enchantments). The dummy copy is dropped afterwards; that drop advances the
+ * player RNG but not the table seed, which the next plan accounts for anyway.
+ */
+public class EnchantAutomation extends LongTask {
+    private static final int WAIT_TIMEOUT_TICKS = 200;
+    /** grace ticks before comparing synced menu state against predictions (server sync latency) */
+    private static final int VERIFY_DELAY_TICKS = 6;
+    /** grace ticks for a freshly opened menu's initial content sync before declaring a mismatch */
+    private static final int MENU_CONTENT_GRACE_TICKS = 5;
+    private static final int LAPIS_RESERVE = 6;
+
+    /** One configured enchantment request for a merged item type (from the selection GUI). */
+    public record TypeConfig(Item item, EnchantPredicate predicate) {
+    }
+
+    private enum Phase {
+        RESOLVE,
+        FETCH_DUMMY_OPEN, FETCH_DUMMY_TAKE, FETCH_DUMMY_CLOSE,
+        REFILL_LAPIS_OPEN, REFILL_LAPIS_TAKE, REFILL_LAPIS_CLOSE,
+        OPEN_ITEM_BOX, TAKE_ITEM, CLOSE_ITEM_BOX,
+        THROWING,
+        BOOKSHELF_OPEN, BOOKSHELF_SET_PAGE, BOOKSHELF_WAIT_PAGE, BOOKSHELF_CLOSE, BOOKSHELF_WAIT_ACTUAL,
+        TABLE_OPEN, PLACE_LAPIS, PLACE_FIRST, VERIFY_FIRST,
+        DUMMY, DUMMY_VERIFY, TAKE_DUMMY_OUT, DROP_DUMMY, PLACE_REAL, VERIFY_SWAPPED,
+        WINDOW_THROWING,
+        ENCHANT, ENCHANT_WAIT, ENCHANT_VERIFY,
+        TAKE_ITEM_OUT, TABLE_CLOSE,
+        RETURN_OPEN, RETURN_PUT, RETURN_CLOSE,
+        NEXT_ITEM,
+        DONE
+    }
+
+    private Phase phase = Phase.RESOLVE;
+    private int phaseTicks = 0;
+    private int queueIndex = 0;
+    private final List<TypeConfig> configs;
+    private final List<Item> queue = new ArrayList<>();
+    private final Set<Item> skippedItems = new HashSet<>();
+
+    private final Item dummyItem;
+    private int dummyInvSlot = -1;
+    private int dummyBoxSlot = -1;
+
+    private EnchantSolver.Plan plan;
+    private int boxSlot = -1;
+    private int itemInvSlot = -1;
+    private @Nullable ItemThrowTask throwTask;
+
+    /**
+     * Round-trip fence for container closes: the server processes ServerboundContainerClosePacket
+     * asynchronously, and QuickShulker's open request indexes into the server's CURRENT container
+     * menu - opening a box too soon after closing one would index into the stale menu and never
+     * open anything.
+     */
+    @Nullable
+    private CompletableFuture<Void> closeFence = null;
+    private int closeFenceTicks = 0;
+
+    private boolean cleanedUp = false;
+
+    /** true while the dummy copy is being dropped - its DROP_ITEM call is intended and mirror-maintained */
+    private boolean droppingDummy = false;
+
+    private static @Nullable EnchantAutomation running = null;
+    private static @Nullable List<TypeConfig> pending = null;
+
+    static {
+        // the dummy drop has no ItemThrowTask listening, so the engine itself marks its
+        // DROP_ITEM call as maintained (otherwise the player crack state would reset)
+        PlayerRandCracker.RNG_CALLED_EVENT.register(EnchantAutomation::onSelfRngCall);
+    }
+
+    private static void onSelfRngCall(PlayerRandCracker.RNGCallEvent event) {
+        EnchantAutomation automation = running;
+        if (automation != null && automation.droppingDummy
+                && event.getType() == PlayerRandCracker.RNGCallType.DROP_ITEM) {
+            event.setMaintained();
+        }
+    }
+
+    public static @Nullable EnchantAutomation getRunning() {
+        return running;
+    }
+
+    /** Store the GUI selection; execution starts on the confirm hotkey. */
+    public static void setPending(List<TypeConfig> configs) {
+        pending = configs;
+    }
+
+    public static boolean hasPending() {
+        return pending != null && !pending.isEmpty();
+    }
+
+    public static void clearPending() {
+        pending = null;
+    }
+
+    /** Called by the confirm hotkey: starts the armed plan. */
+    public static boolean startPending() {
+        if (pending == null || pending.isEmpty()) {
+            return false;
+        }
+        List<TypeConfig> configs = pending;
+        pending = null;
+        return armAndStart(configs);
+    }
+
+    public static boolean armAndStart(List<TypeConfig> configs) {
+        Minecraft mc = Minecraft.getInstance();
+        LocalPlayer player = mc.player;
+        if (player == null || mc.level == null || running != null) {
+            return false;
+        }
+        if (Configs.enchCrackState != EnchantmentCracker.CrackState.CRACKED || !Configs.playerCrackState.knowsSeed()) {
+            ClientCommandHelper.sendError(Component.translatable("quick-enchant.run.notCracked"));
+            return false;
+        }
+        if (EnchantmentCracker.enchantingTablePos == null) {
+            ClientCommandHelper.sendError(Component.translatable("quick-enchant.run.noTable"));
+            return false;
+        }
+
+        EnchantAutomation automation = new EnchantAutomation(configs);
+        if (!automation.buildQueue(player)) {
+            ClientCommandHelper.sendError(Component.translatable("quick-enchant.run.noItems"));
+            return false;
+        }
+        String taskName;
+        try {
+            taskName = TaskManager.addTask("enchantAutomation", automation);
+        } catch (Exception e) {
+            ClientCommandHelper.sendError(Component.translatable("quick-enchant.run.conflict"));
+            return false;
+        }
+        EnchantmentCracker.attachAutomationTask(automation);
+        running = automation;
+        ClientCommandHelper.sendFeedback(Component.translatable("quick-enchant.run.started", automation.queue.size()));
+        return true;
+    }
+
+    /** Flatten the configured types into a per-item execution queue. */
+    private boolean buildQueue(LocalPlayer player) {
+        InventoryScanner.Snapshot snapshot = InventoryScanner.scan(player);
+        for (TypeConfig config : configs) {
+            int count = 0;
+            for (InventoryScanner.BoxInfo box : snapshot.itemBoxes()) {
+                for (ItemStack stack : box.contents()) {
+                    if (stack.is(config.item()) && InventoryScanner.isEnchantableCandidate(stack)) {
+                        count += stack.getCount();
+                    }
+                }
+            }
+            for (int i = 0; i < count; i++) {
+                queue.add(config.item());
+            }
+        }
+        return !queue.isEmpty();
+    }
+
+    public static void abort(String reasonKey) {
+        EnchantAutomation automation = running;
+        if (automation != null) {
+            Component message = Component.translatable(reasonKey)
+                    .append(" ")
+                    .append(Component.translatable("quick-enchant.run.phase", automation.phase));
+            ClientCommandHelper.sendError(message);
+            QuickEnchant.LOGGER.info("automation aborted: {} phase {}", reasonKey, automation.phase);
+            automation.cleanup();
+            automation._break();
+        }
+    }
+
+    private EnchantAutomation(List<TypeConfig> configs) {
+        this.configs = configs;
+        Item parsed = Items.AIR;
+        try {
+            parsed = BuiltInRegistries.ITEM.get(Identifier.parse(ModConfig.Generic.DUMMY_ITEM.getStringValue().trim()))
+                    .map(net.minecraft.core.Holder::value).orElse(Items.AIR);
+        } catch (Exception ignored) {
+        }
+        this.dummyItem = parsed;
+    }
+
+    @Override
+    public void initialize() {
+    }
+
+    @Override
+    public boolean condition() {
+        return phase != Phase.DONE;
+    }
+
+    @Override
+    public void increment() {
+    }
+
+    @Override
+    public boolean stopOnLevelUnload(boolean isDisconnect) {
+        return true;
+    }
+
+    @Override
+    public void onCompleted() {
+        // called after natural completion, abort(), or an unexpected-RNG-call break
+        cleanup();
+    }
+
+    private void cleanup() {
+        if (cleanedUp) {
+            return;
+        }
+        cleanedUp = true;
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player != null) {
+            BoxOps.close(mc.player);
+        }
+        if (throwTask != null) {
+            throwTask._break();
+            throwTask.onCompleted();
+            throwTask = null;
+        }
+        PlayerRandCracker.throwSlotFilter = null;
+        EnchantmentCracker.setCurrentlyThrowingItems(false);
+        EnchantmentCracker.attachAutomationTask(null);
+        closeFence = null;
+        running = null;
+        phase = Phase.DONE;
+    }
+
+    @Override
+    public void body() {
+        Minecraft mc = Minecraft.getInstance();
+        LocalPlayer player = mc.player;
+        if (player == null || mc.level == null || mc.gameMode == null) {
+            cleanup();
+            return;
+        }
+
+        // requirement: the player looks straight down during the whole process
+        player.setXRot(90.0f);
+
+        phaseTicks++;
+        if (throwTask == null && phaseTicks > WAIT_TIMEOUT_TICKS) {
+            if (phase == Phase.TAKE_ITEM || phase == Phase.REFILL_LAPIS_TAKE
+                    || phase == Phase.FETCH_DUMMY_TAKE || phase == Phase.RETURN_PUT) {
+                ClientCommandHelper.sendError(Component.translatable("quick-enchant.run.boxMenuTimeout"));
+            }
+            ClientCommandHelper.sendError(Component.translatable("quick-enchant.run.timeout", phase));
+            cleanup();
+            _break();
+            return;
+        }
+
+        switch (phase) {
+            case RESOLVE -> resolve(player);
+            case FETCH_DUMMY_OPEN -> fetchDummyOpen(player);
+            case FETCH_DUMMY_TAKE -> fetchDummyTake(player);
+            case FETCH_DUMMY_CLOSE -> closeAndWait(player, afterPreparation(player));
+            case REFILL_LAPIS_OPEN -> refillLapisOpen(player);
+            case REFILL_LAPIS_TAKE -> refillLapisTake(player);
+            case REFILL_LAPIS_CLOSE -> closeAndWait(player, afterPreparation(player));
+            case OPEN_ITEM_BOX -> openItemBox(player);
+            case TAKE_ITEM -> takeItem(player);
+            case CLOSE_ITEM_BOX -> closeAndWait(player, Phase.THROWING);
+            case THROWING -> doThrowing(player, plan == null ? 0 : plan.itemThrows(), Phase.BOOKSHELF_OPEN);
+            case BOOKSHELF_OPEN -> bookshelfOpen(player);
+            case BOOKSHELF_SET_PAGE -> bookshelfSetPage(player);
+            case BOOKSHELF_WAIT_PAGE -> bookshelfWaitPage(player);
+            case BOOKSHELF_CLOSE -> closeAndWait(player, Phase.BOOKSHELF_WAIT_ACTUAL);
+            case BOOKSHELF_WAIT_ACTUAL -> bookshelfWaitActual(player);
+            case TABLE_OPEN -> tableOpen(player);
+            case PLACE_LAPIS -> placeLapis(player);
+            case PLACE_FIRST -> placeFirst(player);
+            case VERIFY_FIRST -> verifyAndContinue(plan == null ? null : plan.placePrediction(),
+                    plan != null && plan.dummySlot() == EnchantSolver.NO_DUMMY ? phaseAfterVerify() : Phase.DUMMY);
+            case DUMMY -> dummyEnchant(player);
+            case DUMMY_VERIFY -> verifyDummyCleared(player);
+            case TAKE_DUMMY_OUT -> takeDummyOut(player);
+            case DROP_DUMMY -> dropDummy(player);
+            case PLACE_REAL -> placeReal(player);
+            case VERIFY_SWAPPED -> verifyAndContinue(plan == null ? null : plan.swapPrediction(),
+                    phaseAfterVerify());
+            case WINDOW_THROWING -> doThrowing(player, plan == null ? 0 : plan.windowThrows(), Phase.ENCHANT);
+            case ENCHANT -> enchant(player);
+            case ENCHANT_WAIT -> enchantWait(player);
+            case ENCHANT_VERIFY -> enchantVerify(player);
+            case TAKE_ITEM_OUT -> takeItemOut(player);
+            case TABLE_CLOSE -> closeAndWait(player, Phase.RETURN_OPEN);
+            case RETURN_OPEN -> returnOpen(player);
+            case RETURN_PUT -> returnPut(player);
+            case RETURN_CLOSE -> closeAndWait(player, Phase.NEXT_ITEM);
+            case NEXT_ITEM -> nextItem();
+            default -> finish(true);
+        }
+
+        // Yield back to the game. TaskManager re-runs body() in a tight loop within the SAME tick
+        // unless a delay is scheduled - and asynchronous state (server menus, fences) can never
+        // advance mid-tick, so without this the phase timeout fires instantly.
+        scheduleDelay();
+    }
+
+    private void resetPhase(Phase next) {
+        if (QuickEnchant.LOGGER.isInfoEnabled()) {
+            QuickEnchant.LOGGER.info("automation phase: {} -> {} (after {} ticks)", phase, next, phaseTicks);
+        }
+        phase = next;
+        phaseTicks = 0;
+    }
+
+    /** After the final in-table verification: window throws (priming the next item) if any, else the real enchant. */
+    private Phase phaseAfterVerify() {
+        return plan != null && plan.windowThrows() > 0 ? Phase.WINDOW_THROWING : Phase.ENCHANT;
+    }
+
+    /** Next phase after the dummy fetch or the lapis refill finished. */
+    private Phase afterPreparation(LocalPlayer player) {
+        return countLapis(player) < LAPIS_RESERVE ? Phase.REFILL_LAPIS_OPEN : Phase.OPEN_ITEM_BOX;
+    }
+
+    // ===== resolve =====
+
+    private void resolve(LocalPlayer player) {
+        // a stale server-side menu (any container closed a tick ago) would make the open-box
+        // request index into the wrong server menu and never open anything
+        if (!syncClosed(player)) {
+            return;
+        }
+        if (queueIndex >= queue.size()) {
+            finish(true);
+            return;
+        }
+        Item item = queue.get(queueIndex);
+        if (skippedItems.contains(item)) {
+            queueIndex++;
+            return;
+        }
+
+        InventoryScanner.Snapshot snapshot = InventoryScanner.scan(player);
+        boxSlot = -1;
+        for (InventoryScanner.BoxInfo box : snapshot.itemBoxes()) {
+            boolean contains = box.contents().stream().anyMatch(s -> s.is(item) && InventoryScanner.isEnchantableCandidate(s));
+            if (contains) {
+                boxSlot = box.invSlot();
+                break;
+            }
+        }
+        if (boxSlot == -1) {
+            // out of items of this type; skip the rest of the queue entries for it
+            skippedItems.add(item);
+            ClientCommandHelper.sendError(Component.translatable("quick-enchant.run.itemGoneSoft", item.getName(new ItemStack(item))));
+            return; // next tick skips the remaining entries
+        }
+
+        int actual = EnchantmentCracker.getBookshelfCount(player.level(), EnchantmentCracker.enchantingTablePos);
+        int min = Configs.getMinEnchantBookshelves();
+        int max = Configs.getMaxEnchantBookshelves();
+        boolean lecternAvailable = ModConfig.Generic.LECTERN_ADJUSTMENT.getBooleanValue() && EnchantmentCracker.lecternPos != null;
+        if (!lecternAvailable) {
+            // bookshelf count cannot be modified: only accept plans for the actual count
+            min = actual;
+            max = actual;
+        }
+
+        EnchantPredicate predicate = predicateFor(item);
+        if (predicate == null) {
+            skippedItems.add(item);
+            return;
+        }
+
+        // single-step lookahead: pass the next queue entry so the solver can prime its seed
+        Item nextItem = null;
+        EnchantPredicate nextPredicate = null;
+        for (int j = queueIndex + 1; j < queue.size(); j++) {
+            Item candidate = queue.get(j);
+            if (skippedItems.contains(candidate)) {
+                continue;
+            }
+            nextPredicate = predicateFor(candidate);
+            if (nextPredicate != null) {
+                nextItem = candidate;
+            }
+            break;
+        }
+
+        plan = EnchantSolver.solve(player, item, predicate, min, max, dummyItem, nextItem, nextPredicate);
+        if (plan == null) {
+            ClientCommandHelper.sendError(Component.translatable("quick-enchant.run.unsolvable", item.getName(new ItemStack(item))));
+            skippedItems.add(item);
+            return;
+        }
+
+        if (plan.dummySlot() != EnchantSolver.NO_DUMMY) {
+            if (!new ItemStack(dummyItem).has(DataComponents.ENCHANTABLE)) {
+                ClientCommandHelper.sendError(Component.translatable("quick-enchant.run.badDummyItem"));
+                skippedItems.add(item);
+                return;
+            }
+            // locate a dummy item: first the inventory, then any box
+            dummyInvSlot = findDummyInInventory(player);
+            if (dummyInvSlot < 0) {
+                dummyBoxSlot = findDummyBox(player);
+                if (dummyBoxSlot < 0) {
+                    ClientCommandHelper.sendError(Component.translatable("quick-enchant.run.noDummyItem"));
+                    skippedItems.add(item);
+                    return;
+                }
+                resetPhase(Phase.FETCH_DUMMY_OPEN);
+                return;
+            }
+        } else {
+            dummyInvSlot = -1;
+            dummyBoxSlot = -1;
+        }
+
+        resetPhase(afterPreparation(player));
+    }
+
+    // ===== dummy item fetch =====
+
+    private void fetchDummyOpen(LocalPlayer player) {
+        if (!BoxOps.openBox(player, dummyBoxSlot)) {
+            abort("quick-enchant.run.boxOpenFailed");
+            return;
+        }
+        resetPhase(Phase.FETCH_DUMMY_TAKE);
+    }
+
+    private void fetchDummyTake(LocalPlayer player) {
+        if (!BoxOps.isShulkerMenuOpen(player)) {
+            return;
+        }
+        var menu = player.containerMenu;
+        for (int slot = 0; slot < 27; slot++) {
+            ItemStack stack = menu.getSlot(slot).getItem();
+            if (stack.is(dummyItem) && !stack.isEnchanted()) {
+                BoxOps.quickMove(menu, slot, player);
+                resetPhase(Phase.FETCH_DUMMY_CLOSE);
+                return;
+            }
+        }
+        if (phaseTicks > MENU_CONTENT_GRACE_TICKS) {
+            abort("quick-enchant.run.noDummyItem");
+        }
+    }
+
+    // ===== lapis refill =====
+
+    private void refillLapisOpen(LocalPlayer player) {
+        InventoryScanner.Snapshot snapshot = InventoryScanner.scan(player);
+        if (snapshot.lapisBoxes().isEmpty()) {
+            abort("quick-enchant.run.noLapis");
+            return;
+        }
+        if (!BoxOps.openBox(player, snapshot.lapisBoxes().getFirst().invSlot())) {
+            abort("quick-enchant.run.boxOpenFailed");
+            return;
+        }
+        resetPhase(Phase.REFILL_LAPIS_TAKE);
+    }
+
+    private void refillLapisTake(LocalPlayer player) {
+        if (!BoxOps.isShulkerMenuOpen(player)) {
+            return; // wait for the server to open the menu
+        }
+        var menu = player.containerMenu;
+        for (int slot = 0; slot < 27; slot++) {
+            ItemStack stack = menu.getSlot(slot).getItem();
+            if (InventoryScanner.isLapis(stack)) {
+                BoxOps.quickMove(menu, slot, player);
+                resetPhase(Phase.REFILL_LAPIS_CLOSE);
+                return;
+            }
+        }
+        if (phaseTicks > MENU_CONTENT_GRACE_TICKS) {
+            abort("quick-enchant.run.noLapis");
+        }
+    }
+
+    // ===== take the item out of its box =====
+
+    private void openItemBox(LocalPlayer player) {
+        if (!BoxOps.openBox(player, boxSlot)) {
+            abort("quick-enchant.run.boxOpenFailed");
+            return;
+        }
+        resetPhase(Phase.TAKE_ITEM);
+    }
+
+    private void takeItem(LocalPlayer player) {
+        if (!BoxOps.isShulkerMenuOpen(player)) {
+            return; // wait for the server to open the menu
+        }
+        var menu = player.containerMenu;
+        Item item = queue.get(queueIndex);
+        for (int slot = 0; slot < 27; slot++) {
+            ItemStack stack = menu.getSlot(slot).getItem();
+            if (stack.is(item) && InventoryScanner.isEnchantableCandidate(stack)) {
+                BoxOps.quickMove(menu, slot, player);
+                resetPhase(Phase.CLOSE_ITEM_BOX);
+                return;
+            }
+        }
+        // the initial content sync can lag the screen packet by a tick - only give up once the
+        // menu had time to fill
+        if (phaseTicks > MENU_CONTENT_GRACE_TICKS) {
+            abort("quick-enchant.run.itemGone");
+        }
+    }
+
+    /**
+     * Close any open container and wait until the server has acknowledged the close (round-trip
+     * fence via a command-suggestion request). Falls back to proceeding after a short grace period
+     * if the server never answers the fence.
+     */
+    private boolean syncClosed(LocalPlayer player) {
+        if (!BoxOps.isClosed(player)) {
+            BoxOps.close(player);
+            closeFence = SuggestionsHook.fence();
+            closeFenceTicks = 0;
+            return false;
+        }
+        if (closeFence != null) {
+            closeFenceTicks++;
+            if (!closeFence.isDone() && closeFenceTicks <= 40) {
+                return false;
+            }
+            closeFence = null;
+        }
+        return true;
+    }
+
+    private void closeAndWait(LocalPlayer player, Phase next) {
+        if (syncClosed(player)) {
+            resetPhase(next);
+        }
+    }
+
+    // ===== throwing =====
+
+    private void doThrowing(LocalPlayer player, int count, Phase next) {
+        if (count <= 0) {
+            resetPhase(next);
+            return;
+        }
+
+        if (throwTask == null) {
+            PlayerRandCracker.throwSlotFilter = this::isSafeThrowSlot;
+            EnchantmentCracker.setCurrentlyThrowingItems(true);
+            throwTask = new ItemThrowTask(count, ItemThrowTask.FLAG_WAIT_FOR_ITEMS) {
+                @Override
+                protected void onUnexpectedRNGCall(PlayerRandCracker.RNGCallType callType) {
+                    ClientCommandHelper.sendError(Component.translatable("commands.cenchant.unexpectedCall", callType.getResetMessage()));
+                    EnchantAutomation.abort("quick-enchant.run.aborted");
+                }
+
+                @Override
+                protected void onFailedToThrowItem(PlayerRandCracker.ThrowItemsResult throwItemsResult) {
+                    if (throwItemsResult.getType() != PlayerRandCracker.ThrowItemsResult.Type.NOT_ENOUGH_ITEMS) {
+                        throwItemsResult.sendErrorMessage();
+                        EnchantAutomation.abort("quick-enchant.run.aborted");
+                    }
+                    // NOT_ENOUGH_ITEMS with FLAG_WAIT_FOR_ITEMS: keep waiting until a whitelist
+                    // stack has a spare item (thrown items are picked back up or restocked)
+                }
+            };
+            throwTask.initialize();
+        }
+
+        // drive the throw task manually, one tick at a time
+        throwTask.body();
+        throwTask.unscheduleDelay();
+        if (throwTask.isCompleted()) {
+            throwTask.onCompleted();
+            throwTask = null;
+            PlayerRandCracker.throwSlotFilter = null;
+            EnchantmentCracker.setCurrentlyThrowingItems(false);
+            resetPhase(next);
+        }
+    }
+
+    /**
+     * Whitelist slots only, and never the enchanting table's own item/lapis slots (they are part
+     * of the open menu while the window throws run).
+     */
+    private boolean isSafeThrowSlot(Slot slot) {
+        LocalPlayer player = Minecraft.getInstance().player;
+        if (player != null && player.containerMenu instanceof EnchantmentMenu && slot.container != player.getInventory()) {
+            return false;
+        }
+        return InventoryScanner.isWhitelisted(slot.getItem(), InventoryScanner.getWhitelist());
+    }
+
+    // ===== bookshelf adjustment via lectern =====
+
+    private void bookshelfOpen(LocalPlayer player) {
+        if (plan == null) {
+            finish(false);
+            return;
+        }
+        BlockPos tablePos = EnchantmentCracker.enchantingTablePos;
+        int actual = tablePos == null ? -1 : EnchantmentCracker.getBookshelfCount(player.level(), tablePos);
+        if (actual == plan.bookshelves()) {
+            resetPhase(Phase.TABLE_OPEN);
+            return;
+        }
+        BlockPos lecternPos = EnchantmentCracker.lecternPos;
+        if (lecternPos == null || !ModConfig.Generic.LECTERN_ADJUSTMENT.getBooleanValue()) {
+            ClientCommandHelper.sendError(Component.translatable("quick-enchant.run.bookshelfMismatch", actual, plan.bookshelves()));
+            cleanup();
+            _break();
+            return;
+        }
+        BlockHitResult hit = new BlockHitResult(Vec3.atCenterOf(lecternPos), Direction.UP, lecternPos, false);
+        Minecraft.getInstance().gameMode.useItemOn(player, InteractionHand.MAIN_HAND, hit);
+        resetPhase(Phase.BOOKSHELF_SET_PAGE);
+    }
+
+    private void bookshelfSetPage(LocalPlayer player) {
+        if (!(player.containerMenu instanceof LecternMenu lecternMenu)) {
+            return; // wait for the menu to open
+        }
+        if (plan == null) {
+            cleanup();
+            _break();
+            return;
+        }
+        // page x == x bookshelves; button 100+x jumps directly to the page
+        Minecraft.getInstance().gameMode.handleInventoryButtonClick(lecternMenu.containerId, 100 + plan.bookshelves());
+        resetPhase(Phase.BOOKSHELF_WAIT_PAGE);
+    }
+
+    private void bookshelfWaitPage(LocalPlayer player) {
+        if (!(player.containerMenu instanceof LecternMenu lecternMenu)) {
+            return;
+        }
+        if (plan != null && lecternMenu.getPage() == plan.bookshelves()) {
+            resetPhase(Phase.BOOKSHELF_CLOSE);
+        }
+    }
+
+    private void bookshelfWaitActual(LocalPlayer player) {
+        if (plan == null) {
+            cleanup();
+            _break();
+            return;
+        }
+        BlockPos tablePos = EnchantmentCracker.enchantingTablePos;
+        if (tablePos == null) {
+            abort("quick-enchant.run.noTable");
+            return;
+        }
+        int actual = EnchantmentCracker.getBookshelfCount(player.level(), tablePos);
+        if (actual == plan.bookshelves()) {
+            // page verified via the lectern DataSlot and the real count verified by scanning
+            resetPhase(Phase.TABLE_OPEN);
+        }
+        // else: wait for the redstone circuit to finish moving the bookshelves
+    }
+
+    // ===== table =====
+
+    private void tableOpen(LocalPlayer player) {
+        BlockPos tablePos = EnchantmentCracker.enchantingTablePos;
+        if (tablePos == null) {
+            abort("quick-enchant.run.noTable");
+            return;
+        }
+        BlockHitResult hit = new BlockHitResult(Vec3.atCenterOf(tablePos), Direction.UP, tablePos, false);
+        Minecraft.getInstance().gameMode.useItemOn(player, InteractionHand.MAIN_HAND, hit);
+        resetPhase(Phase.PLACE_LAPIS);
+    }
+
+    private void placeLapis(LocalPlayer player) {
+        if (!(player.containerMenu instanceof EnchantmentMenu menu)) {
+            return; // wait for the table menu
+        }
+        ItemStack lapisSlot = menu.getSlot(1).getItem();
+        if (InventoryScanner.isLapis(lapisSlot) && lapisSlot.getCount() >= LAPIS_RESERVE) {
+            resetPhase(Phase.PLACE_FIRST);
+            return;
+        }
+        int lapisInvSlot = findInInventory(player, Items.LAPIS_LAZULI);
+        if (lapisInvSlot < 0) {
+            abort("quick-enchant.run.noLapis");
+            return;
+        }
+        Integer menuSlot = BoxOps.findInventorySlotInMenu(menu, player, lapisInvSlot);
+        if (menuSlot == null) {
+            abort("quick-enchant.run.slotNotFound");
+            return;
+        }
+        BoxOps.quickMove(menu, menuSlot, player);
+    }
+
+    /** Place the dummy item (when the plan needs one) or the real item into table slot 0. */
+    private void placeFirst(LocalPlayer player) {
+        if (plan == null) {
+            cleanup();
+            _break();
+            return;
+        }
+        if (plan.dummySlot() == EnchantSolver.NO_DUMMY) {
+            placeReal(player);
+            return;
+        }
+        if (!(player.containerMenu instanceof EnchantmentMenu menu)) {
+            return;
+        }
+        if (menu.getSlot(0).hasItem()) {
+            resetPhase(Phase.VERIFY_FIRST);
+            return;
+        }
+        dummyInvSlot = findDummyInInventory(player);
+        if (dummyInvSlot < 0) {
+            abort("quick-enchant.run.noDummyItem");
+            return;
+        }
+        Integer menuSlot = BoxOps.findInventorySlotInMenu(menu, player, dummyInvSlot);
+        if (menuSlot == null) {
+            abort("quick-enchant.run.slotNotFound");
+            return;
+        }
+        BoxOps.quickMove(menu, menuSlot, player);
+    }
+
+    /** Place the real (still unenchanted) item into table slot 0. */
+    private void placeReal(LocalPlayer player) {
+        if (!(player.containerMenu instanceof EnchantmentMenu menu)) {
+            return;
+        }
+        if (menu.getSlot(0).hasItem()) {
+            // the dummy was dropped, so whatever sits here now should be nothing; treat as placed
+            resetPhase(plan.dummySlot() == EnchantSolver.NO_DUMMY ? Phase.VERIFY_FIRST : Phase.VERIFY_SWAPPED);
+            return;
+        }
+        if (itemInvSlot < 0 || !player.getInventory().getItem(itemInvSlot).is(queue.get(queueIndex))) {
+            itemInvSlot = findItemInInventory(player, queue.get(queueIndex), true);
+        }
+        if (itemInvSlot < 0) {
+            abort("quick-enchant.run.itemGone");
+            return;
+        }
+        Integer menuSlot = BoxOps.findInventorySlotInMenu(menu, player, itemInvSlot);
+        if (menuSlot == null) {
+            abort("quick-enchant.run.slotNotFound");
+            return;
+        }
+        BoxOps.quickMove(menu, menuSlot, player);
+    }
+
+    private void dummyEnchant(LocalPlayer player) {
+        if (!(player.containerMenu instanceof EnchantmentMenu menu) || plan == null) {
+            return;
+        }
+        int slot = plan.dummySlot();
+        if (!canAfford(player, menu, slot)) {
+            abort("quick-enchant.run.cantAfford");
+            return;
+        }
+        Minecraft.getInstance().gameMode.handleInventoryButtonClick(menu.containerId, slot);
+        PlayerRandCracker.onEnchantedItem();
+        resetPhase(Phase.DUMMY_VERIFY);
+    }
+
+    private boolean canAfford(LocalPlayer player, EnchantmentMenu menu, int slot) {
+        return menu.costs[slot] > 0
+                && InventoryScanner.isLapis(menu.getSlot(1).getItem())
+                && menu.getSlot(1).getItem().getCount() >= slot + 1
+                && player.experienceLevel >= Math.max(slot + 1, menu.costs[slot]);
+    }
+
+    private void verifyAndContinue(EnchantmentCracker.TablePrediction prediction, Phase next) {
+        if (phaseTicks <= VERIFY_DELAY_TICKS || prediction == null) {
+            return;
+        }
+        if (!(Minecraft.getInstance().player != null
+                && Minecraft.getInstance().player.containerMenu instanceof EnchantmentMenu menu)) {
+            return;
+        }
+        if (!EnchantmentCracker.tableMatchesPrediction(menu, prediction)) {
+            abort("quick-enchant.run.verifyFailed");
+            return;
+        }
+        resetPhase(next);
+    }
+
+    /**
+     * After the dummy enchant the slot-0 item carries enchantments, so the server reports
+     * isEnchantable == false and zeroes all three offers (independent of the seed). Expecting
+     * exactly that state proves the dummy enchant executed; whether it consumed the RIGHT
+     * nextInt is verified by the swap verification once the real item is in the table.
+     */
+    private void verifyDummyCleared(LocalPlayer player) {
+        if (phaseTicks <= VERIFY_DELAY_TICKS || !(player.containerMenu instanceof EnchantmentMenu menu)) {
+            return;
+        }
+        for (int i = 0; i < 3; i++) {
+            if (menu.costs[i] != 0 || menu.enchantClue[i] != -1 || menu.levelClue[i] != -1) {
+                abort("quick-enchant.run.verifyFailed");
+                return;
+            }
+        }
+        resetPhase(Phase.TAKE_DUMMY_OUT);
+    }
+
+    /** Pick the enchanted dummy up with the cursor... */
+    private void takeDummyOut(LocalPlayer player) {
+        if (!(player.containerMenu instanceof EnchantmentMenu menu)) {
+            return;
+        }
+        if (!menu.getCarried().isEmpty()) {
+            resetPhase(Phase.DROP_DUMMY);
+            return;
+        }
+        if (!menu.getSlot(0).hasItem()) {
+            abort("quick-enchant.run.itemGone");
+            return;
+        }
+        Minecraft.getInstance().gameMode.handleContainerInput(menu.containerId, 0, 0, ContainerInput.PICKUP, player);
+    }
+
+    /** ...and drop it by clicking outside the container (slot -999, whole stack). */
+    private void dropDummy(LocalPlayer player) {
+        if (!(player.containerMenu instanceof EnchantmentMenu menu)) {
+            return;
+        }
+        if (menu.getCarried().isEmpty()) {
+            resetPhase(Phase.PLACE_REAL);
+            return;
+        }
+        // the drop consumes 4 player RNG steps on purpose: mark it maintained and suppress the
+        // "unexpected call" abort while the click is processed
+        droppingDummy = true;
+        EnchantmentCracker.setCurrentlyThrowingItems(true);
+        Minecraft.getInstance().gameMode.handleContainerInput(menu.containerId, -999, 0, ContainerInput.PICKUP, player);
+        EnchantmentCracker.setCurrentlyThrowingItems(false);
+        droppingDummy = false;
+    }
+
+    private void enchant(LocalPlayer player) {
+        if (!(player.containerMenu instanceof EnchantmentMenu menu) || plan == null) {
+            return;
+        }
+        int slot = plan.realSlot();
+        if (!canAfford(player, menu, slot)) {
+            abort("quick-enchant.run.cantAfford");
+            return;
+        }
+        Minecraft.getInstance().gameMode.handleInventoryButtonClick(menu.containerId, slot);
+        PlayerRandCracker.onEnchantedItem();
+        resetPhase(Phase.ENCHANT_WAIT);
+    }
+
+    private void enchantWait(LocalPlayer player) {
+        if (!(player.containerMenu instanceof EnchantmentMenu menu)) {
+            return;
+        }
+        ItemStack enchanted = menu.getSlot(0).getItem();
+        if (!enchanted.isEmpty() && enchanted.isEnchanted()) {
+            resetPhase(Phase.ENCHANT_VERIFY);
+        }
+    }
+
+    private void enchantVerify(LocalPlayer player) {
+        if (!(player.containerMenu instanceof EnchantmentMenu menu) || plan == null) {
+            return;
+        }
+        ItemStack enchanted = menu.getSlot(0).getItem();
+        List<EnchantmentInstance> actual = new ArrayList<>();
+        enchanted.getEnchantments().keySet().forEach(holder ->
+                actual.add(new EnchantmentInstance(holder, enchanted.getEnchantments().getLevel(holder))));
+        List<EnchantmentInstance> expected = plan.realList();
+        if (!sameEnchantments(actual, expected)) {
+            abort("quick-enchant.run.enchantMismatch");
+            return;
+        }
+        resetPhase(Phase.TAKE_ITEM_OUT);
+    }
+
+    private static boolean sameEnchantments(List<EnchantmentInstance> a, List<EnchantmentInstance> b) {
+        if (a.size() != b.size()) {
+            return false;
+        }
+        for (EnchantmentInstance instance : a) {
+            boolean found = false;
+            for (EnchantmentInstance other : b) {
+                if (other.enchantment() == instance.enchantment() && other.level() == instance.level()) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void takeItemOut(LocalPlayer player) {
+        if (!(player.containerMenu instanceof EnchantmentMenu menu)) {
+            return;
+        }
+        if (!menu.getSlot(0).hasItem()) {
+            resetPhase(Phase.TABLE_CLOSE);
+            return;
+        }
+        BoxOps.quickMove(menu, 0, player);
+    }
+
+    // ===== return the item to its original box =====
+
+    private void returnOpen(LocalPlayer player) {
+        int invSlot = findItemInInventory(player, queue.get(queueIndex), false);
+        if (invSlot < 0) {
+            abort("quick-enchant.run.itemGone");
+            return;
+        }
+        itemInvSlot = invSlot;
+        if (!BoxOps.openBox(player, boxSlot)) {
+            abort("quick-enchant.run.boxOpenFailed");
+            return;
+        }
+        resetPhase(Phase.RETURN_PUT);
+    }
+
+    private void returnPut(LocalPlayer player) {
+        if (!BoxOps.isShulkerMenuOpen(player)) {
+            return;
+        }
+        Integer menuSlot = BoxOps.findInventorySlotInMenu(player.containerMenu, player, itemInvSlot);
+        if (menuSlot == null) {
+            if (phaseTicks > MENU_CONTENT_GRACE_TICKS) {
+                abort("quick-enchant.run.slotNotFound");
+            }
+            return;
+        }
+        BoxOps.quickMove(player.containerMenu, menuSlot, player);
+        resetPhase(Phase.RETURN_CLOSE);
+    }
+
+    private void nextItem() {
+        queueIndex++;
+        plan = null;
+        itemInvSlot = -1;
+        dummyInvSlot = -1;
+        dummyBoxSlot = -1;
+        resetPhase(Phase.RESOLVE);
+    }
+
+    // ===== helpers =====
+
+    private @Nullable EnchantPredicate predicateFor(Item item) {
+        for (TypeConfig config : configs) {
+            if (config.item() == item) {
+                return config.predicate();
+            }
+        }
+        return null;
+    }
+
+    private void finish(boolean success) {
+        if (success) {
+            ClientCommandHelper.sendFeedback(Component.translatable("quick-enchant.run.done").withStyle(ChatFormatting.GREEN));
+        }
+        cleanup();
+    }
+
+    private int countLapis(LocalPlayer player) {
+        int count = 0;
+        for (int i = 0; i < player.getInventory().getContainerSize(); i++) {
+            ItemStack stack = player.getInventory().getItem(i);
+            if (InventoryScanner.isLapis(stack)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
+    }
+
+    private int findInInventory(LocalPlayer player, Item item) {
+        for (int i = 0; i < player.getInventory().getContainerSize(); i++) {
+            if (player.getInventory().getItem(i).is(item)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private int findDummyInInventory(LocalPlayer player) {
+        for (int i = 0; i < player.getInventory().getContainerSize(); i++) {
+            ItemStack stack = player.getInventory().getItem(i);
+            if (stack.is(dummyItem) && !stack.isEnchanted()) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private int findDummyBox(LocalPlayer player) {
+        for (int slot = 0; slot < player.getInventory().getContainerSize(); slot++) {
+            ItemStack stack = player.getInventory().getItem(slot);
+            if (!InventoryScanner.isShulkerBox(stack)) {
+                continue;
+            }
+            for (ItemStack content : InventoryScanner.readBoxContents(stack)) {
+                if (content.is(dummyItem) && !content.isEnchanted()) {
+                    return slot;
+                }
+            }
+        }
+        return -1;
+    }
+
+    private int findItemInInventory(LocalPlayer player, Item item, boolean unenchanted) {
+        for (int i = 0; i < player.getInventory().getContainerSize(); i++) {
+            ItemStack stack = player.getInventory().getItem(i);
+            if (stack.is(item) && (!unenchanted || !stack.isEnchanted())) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    @Override
+    public String toString() {
+        return "EnchantAutomation[phase=" + phase + ", item " + queueIndex + "/" + queue.size() + "]";
+    }
+}

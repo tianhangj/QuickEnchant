@@ -1,0 +1,137 @@
+plugins {
+	id 'net.fabricmc.fabric-loom' version "${loom_version}"
+	id 'maven-publish'
+}
+
+// ===== dev build numbering: every `gradlew build` produces base-dev.N and increments N =====
+def devNumberFile = file('dev-build-number.txt')
+if (!devNumberFile.exists()) {
+	devNumberFile.text = '1'
+}
+def devNumber = devNumberFile.text.trim().toInteger()
+version = "${project.version}-dev.${devNumber}"
+
+tasks.named('build') {
+	doLast {
+		devNumberFile.text = String.valueOf(devNumber + 1)
+		println "quick-enchant built as ${version} (next dev number: ${devNumber + 1})"
+	}
+}
+
+repositories {
+	maven {
+		name = 'Sakura Ryoko'
+		url = 'https://masa.dy.fi/maven/sakura-ryoko'
+		content {
+			includeGroupAndSubgroups("fi.dy.masa")
+		}
+	}
+	maven {
+		name = 'Fallen Breath'
+		url = 'https://maven.fallenbreath.me/releases'
+		content {
+			includeGroupAndSubgroups("me.fallenbreath")
+		}
+	}
+	maven {
+		name = 'TerraformersMC'
+		url = 'https://maven.terraformersmc.com/releases/'
+		content {
+			includeGroupAndSubgroups("com.terraformersmc")
+		}
+	}
+	maven {
+		name = 'MoRanpcy'
+		url = 'https://maven.moranpcy.com/releases'
+		content {
+			includeGroupAndSubgroups("net.kyrptonaught")
+		}
+	}
+	maven {
+		name = 'Seedfinding'
+		url = 'https://maven.seedfinding.com'
+	}
+	maven {
+		name = 'LatticG'
+		url = 'https://maven.latticg.com'
+	}
+}
+
+loom {
+	accessWidenerPath = file('src/main/resources/quick-enchant.aw')
+}
+
+dependencies {
+	// To change the versions see the gradle.properties file
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+
+	// Fabric API. This is technically optional, but you probably want it anyway.
+	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+
+	// MaLiLib for global config system (loom 1.17 auto-detects and remaps mod jars)
+	implementation "fi.dy.masa.malilib:malilib-fabric-${project.minecraft_version}:${project.malilib_version}"
+
+	// QuickShulker for opening shulker boxes inside the inventory
+	implementation "net.kyrptonaught:quickshulker:${project.quickshulker_version}"
+
+	// RNG seed search libraries (bundled into the mod jar)
+	include implementation("com.seedfinding:mc_seed:${project.seedfinding_seed_version}")
+	include implementation("com.seedfinding:latticg:${project.latticg_version}:rt")
+
+	testImplementation "net.fabricmc:fabric-loader-junit:${project.loader_version}"
+	testImplementation "org.junit.jupiter:junit-jupiter:${project.junit_version}"
+}
+
+test {
+	useJUnitPlatform()
+}
+
+processResources {
+	def version = project.version
+	inputs.property "version", version
+
+	filesMatching("fabric.mod.json") {
+		expand "version": version
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 25
+}
+
+java {
+	// Loom will automatically attach sourcesJar to a RemapSourcesJar task and to the "build" task
+	// if it is present.
+	// If you remove this line, sources will not be generated.
+	withSourcesJar()
+
+	sourceCompatibility = JavaVersion.VERSION_25
+	targetCompatibility = JavaVersion.VERSION_25
+}
+
+jar {
+	def projectName = project.name
+	inputs.property "projectName", projectName
+
+	from("LICENSE") {
+		rename { "${it}_$projectName"}
+	}
+}
+
+// configure the maven publication
+publishing {
+	publications {
+		create("mavenJava", MavenPublication) {
+			from components.java
+		}
+	}
+
+	// See https://docs.gradle.org/current/userguide/publishing_maven.html for information on how to set up publishing.
+	repositories {
+		// Add repositories to publish to here.
+		// Notice: This block does NOT have the same function as the block in the top level.
+		// The repositories here will be used for publishing your artifact, not for
+		// retrieving dependencies.
+	}
+}
