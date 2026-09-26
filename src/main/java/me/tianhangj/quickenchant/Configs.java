@@ -24,7 +24,7 @@ public class Configs {
     private static int minEnchantLevels = 1;
     private static int maxEnchantLevels = 30;
     private static int maxEnchantSlot = 3;
-    private static float itemThrowsPerTick = 1;
+    private static int maxThrowsPerTick = 8;
 
     public static int getMaxEnchantItemThrows() {
         return maxEnchantItemThrows;
@@ -78,12 +78,12 @@ public class Configs {
         Configs.maxEnchantSlot = Mth.clamp(maxEnchantSlot, 1, 3);
     }
 
-    public static float getItemThrowsPerTick() {
-        return itemThrowsPerTick;
+    public static int getMaxThrowsPerTick() {
+        return maxThrowsPerTick;
     }
 
-    public static void setItemThrowsPerTick(float itemThrowsPerTick) {
-        Configs.itemThrowsPerTick = Mth.clamp(itemThrowsPerTick, 0.05f, 64.0f);
+    public static void setMaxThrowsPerTick(int maxThrowsPerTick) {
+        Configs.maxThrowsPerTick = Mth.clamp(maxThrowsPerTick, 1, 256);
     }
 
     /**
@@ -96,7 +96,7 @@ public class Configs {
         setMinEnchantLevels(ModConfig.Generic.MIN_ENCHANT_LEVELS.getIntegerValue());
         setMaxEnchantLevels(ModConfig.Generic.MAX_ENCHANT_LEVELS.getIntegerValue());
         setMaxEnchantSlot(ModConfig.Generic.MAX_ENCHANT_SLOT.getIntegerValue());
-        setItemThrowsPerTick((float) ModConfig.Generic.ITEM_THROWS_PER_TICK.getDoubleValue());
+        setMaxThrowsPerTick(ModConfig.Generic.MAX_THROWS_PER_TICK.getIntegerValue());
         enchantingPrediction = ModConfig.Generic.ENCHANTING_PREDICTION.getBooleanValue();
         playerRNGMaintenance = ModConfig.Generic.PLAYER_RNG_MAINTENANCE.getBooleanValue();
     }

@@ -58,6 +58,14 @@ public class EnchantAutomation extends LongTask {
     private static final int VERIFY_DELAY_TICKS = 6;
     /** grace ticks for a freshly opened menu's initial content sync before declaring a mismatch */
     private static final int MENU_CONTENT_GRACE_TICKS = 5;
+    /**
+     * Re-click pacing: container clicks are re-sent at most once per this many ticks. Flooding
+     * clicks every tick makes the server answer each stale-stateId click with a full state
+     * resync, which both wastes bandwidth and reverts the client's local prediction, delaying
+     * the very change the phase is waiting for (observed as probabilistic PLACE_REAL timeouts
+     * on dedicated servers).
+     */
+    private static final int CLICK_RETRY_TICKS = 40;
     private static final int LAPIS_RESERVE = 6;
 
     /** One configured enchantment request for a merged item type (from the selection GUI). */
@@ -348,6 +356,11 @@ public class EnchantAutomation extends LongTask {
         scheduleDelay();
     }
 
+    /** true on the tick a (re-)click should be sent: first tick, then every CLICK_RETRY_TICKS. */
+    private boolean clickGate() {
+        return (phaseTicks - 1) % CLICK_RETRY_TICKS == 0;
+    }
+
     private void resetPhase(Phase next) {
         if (QuickEnchant.LOGGER.isInfoEnabled()) {
             QuickEnchant.LOGGER.info("automation phase: {} -> {} (after {} ticks)", phase, next, phaseTicks);
@@ -519,8 +532,9 @@ public class EnchantAutomation extends LongTask {
         for (int slot = 0; slot < 27; slot++) {
             ItemStack stack = menu.getSlot(slot).getItem();
             if (InventoryScanner.isLapis(stack)) {
-                BoxOps.quickMove(menu, slot, player);
-                resetPhase(Phase.REFILL_LAPIS_CLOSE);
+                if (clickGate()) {
+                    BoxOps.quickMove(menu, slot, player);
+                }
                 return;
             }
         }
@@ -773,7 +787,9 @@ public class EnchantAutomation extends LongTask {
             abort("quick-enchant.run.slotNotFound");
             return;
         }
-        BoxOps.quickMove(menu, menuSlot, player);
+        if (clickGate()) {
+            BoxOps.quickMove(menu, menuSlot, player);
+        }
     }
 
     /** Place the real (still unenchanted) item into table slot 0. */
@@ -798,7 +814,9 @@ public class EnchantAutomation extends LongTask {
             abort("quick-enchant.run.slotNotFound");
             return;
         }
-        BoxOps.quickMove(menu, menuSlot, player);
+        if (clickGate()) {
+            BoxOps.quickMove(menu, menuSlot, player);
+        }
     }
 
     private void dummyEnchant(LocalPlayer player) {
@@ -869,7 +887,9 @@ public class EnchantAutomation extends LongTask {
             abort("quick-enchant.run.itemGone");
             return;
         }
-        Minecraft.getInstance().gameMode.handleContainerInput(menu.containerId, 0, 0, ContainerInput.PICKUP, player);
+        if (clickGate()) {
+            Minecraft.getInstance().gameMode.handleContainerInput(menu.containerId, 0, 0, ContainerInput.PICKUP, player);
+        }
     }
 
     /** ...and drop it by clicking outside the container (slot -999, whole stack). */
@@ -883,11 +903,13 @@ public class EnchantAutomation extends LongTask {
         }
         // the drop consumes 4 player RNG steps on purpose: mark it maintained and suppress the
         // "unexpected call" abort while the click is processed
-        droppingDummy = true;
-        EnchantmentCracker.setCurrentlyThrowingItems(true);
-        Minecraft.getInstance().gameMode.handleContainerInput(menu.containerId, -999, 0, ContainerInput.PICKUP, player);
-        EnchantmentCracker.setCurrentlyThrowingItems(false);
-        droppingDummy = false;
+        if (clickGate()) {
+            droppingDummy = true;
+            EnchantmentCracker.setCurrentlyThrowingItems(true);
+            Minecraft.getInstance().gameMode.handleContainerInput(menu.containerId, -999, 0, ContainerInput.PICKUP, player);
+            EnchantmentCracker.setCurrentlyThrowingItems(false);
+            droppingDummy = false;
+        }
     }
 
     private void enchant(LocalPlayer player) {
@@ -957,7 +979,9 @@ public class EnchantAutomation extends LongTask {
             resetPhase(Phase.TABLE_CLOSE);
             return;
         }
-        BoxOps.quickMove(menu, 0, player);
+        if (clickGate()) {
+            BoxOps.quickMove(menu, 0, player);
+        }
     }
 
     // ===== return the item to its original box =====

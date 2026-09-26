@@ -27,7 +27,7 @@ RNG 破解与预测核心移植自 [clientcommands](https://github.com/Earthcomp
 gradlew build
 ```
 
-每次构建自动产出 `1.1.0-dev.N` 版本（N 从 `dev-build-number.txt` 读取并在构建成功后自动 +1），用于区分不同构建的 jar。`gradle.properties` 中 `version` 为基础版本号，`org.gradle.java.home` 指向本机 JDK 25（其他机器需相应修改）。
+每次构建自动产出 `1.2.0-dev.N` 版本（N 从 `dev-build-number.txt` 读取并在构建成功后自动 +1），用于区分不同构建的 jar。`gradle.properties` 中 `version` 为基础版本号，`org.gradle.java.home` 指向本机 JDK 25（其他机器需相应修改）。
 
 ## License
 

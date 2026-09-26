@@ -1,7 +1,11 @@
 package me.tianhangj.quickenchant.gui;
 
+import com.seedfinding.mcseed.lcg.LCG;
+import com.seedfinding.mcseed.rand.Rand;
+import me.tianhangj.quickenchant.Configs;
 import me.tianhangj.quickenchant.automation.EnchantAutomation;
 import me.tianhangj.quickenchant.automation.PrepareFlow;
+import me.tianhangj.quickenchant.features.EnchantmentCracker;
 import me.tianhangj.quickenchant.command.ClientCommandHelper;
 import me.tianhangj.quickenchant.config.FlowState;
 import me.tianhangj.quickenchant.inventory.InventoryScanner;
@@ -55,6 +59,10 @@ public class EnchantSelectScreen extends Screen {
     private final List<Integer> selectedSlots;
     private boolean typesBuilt = false;
     private int selected = 0;
+    private boolean infeasible = false;
+
+    /** upper bound of the feasibility sweep (throws from a random starting seed) */
+    private static final int MAX_FEASIBILITY_THROWS = 1024;
 
     public EnchantSelectScreen(List<Integer> selectedSlots, @Nullable Screen parent) {
         super(Component.translatable("quick-enchant.flow.enchantTitle"));
@@ -140,6 +148,7 @@ public class EnchantSelectScreen extends Screen {
             typesBuilt = true;
             buildTypes();
         }
+        infeasible = computeInfeasible(types.get(selected).item());
         int centerX = this.width / 2;
         int y = 30;
 
@@ -265,6 +274,63 @@ public class EnchantSelectScreen extends Screen {
         onClose();
     }
 
+    /**
+     * Live feasibility probe: take a random player starting seed and sweep the standard
+     * manipulation (n throws advance the RNG, the dummy enchant writes the next nextInt into the
+     * table) - if none of the resulting table seeds offers the configured enchantments, the
+     * target is most likely unobtainable and a red warning is shown.
+     */
+    private boolean computeInfeasible(Item item) {
+        TypeState ts = states.get(item);
+        if (ts == null || ts.rows.isEmpty() || this.minecraft == null || this.minecraft.player == null) {
+            return false;
+        }
+        EnchantPredicate predicate = new EnchantPredicate();
+        predicate.setExactly(ts.exactly);
+        for (RowDraft row : ts.rows) {
+            if (row.enchantment != null) {
+                predicate.addRow(new EnchantPredicate.Row(row.mode, row.enchantment, row.level));
+            }
+        }
+        if (predicate.isEmpty()) {
+            return false;
+        }
+
+        var registry = this.minecraft.player.registryAccess().lookupOrThrow(Registries.ENCHANTMENT);
+        ItemStack stack = new ItemStack(item);
+        int bMin = 0;
+        int bMax = 15;
+        if (!me.tianhangj.quickenchant.config.ModConfig.Generic.LECTERN_ADJUSTMENT.getBooleanValue()) {
+            bMin = 15;
+            bMax = 15;
+        }
+
+        long startSeed = new java.util.Random().nextLong();
+        Rand rand = new Rand(LCG.JAVA, startSeed);
+        for (int n = 0; n <= MAX_FEASIBILITY_THROWS; n++) {
+            // n throws advance the RNG by 4n steps, then the dummy enchant consumes one nextInt
+            // which becomes the table seed for the real enchant
+            rand.advance(n == 0 ? 1 : 4);
+            int xpSeed = (int) rand.nextBits(32);
+            for (int b = bMin; b <= bMax; b++) {
+                for (int slot = 0; slot < 3; slot++) {
+                    var list = EnchantmentCracker.simulateSlotList(registry, xpSeed, slot, b, stack);
+                    if (list.isEmpty()) {
+                        continue;
+                    }
+                    int cost = EnchantmentCracker.simulateSlotCost(xpSeed, slot, b, stack);
+                    if (cost < Configs.getMinEnchantLevels() || cost > Configs.getMaxEnchantLevels()) {
+                        continue;
+                    }
+                    if (predicate.test(list)) {
+                        return false; // feasible
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
     private Component typeLabel() {
         TypeEntry entry = types.get(selected);
         return entry.item().getName(new ItemStack(entry.item())).copy().append("*" + entry.count());
@@ -297,6 +363,10 @@ public class EnchantSelectScreen extends Screen {
     public void extractRenderState(net.minecraft.client.gui.GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {
         super.extractRenderState(graphics, mouseX, mouseY, partialTick);
         graphics.centeredText(this.font, this.title, this.width / 2, 15, 0xFFFFFF);
+        if (infeasible) {
+            graphics.centeredText(this.font, Component.translatable("quick-enchant.flow.infeasible")
+                    .withStyle(ChatFormatting.RED), this.width / 2, this.height - 60, 0xFFFFFFFF);
+        }
     }
 
     @Override

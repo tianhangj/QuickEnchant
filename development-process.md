@@ -66,7 +66,21 @@
 14. **修复"目标物品不在预期位置"1 秒即中止 + 增加阶段诊断**（2026-09-26，日志 3 定位）：日志 3 显示盒界面打开 1 秒内即以 itemGone 中止，且中止前无任何菜单初始化日志——最符合的解释是盒菜单的界面包先于内容包被处理，`takeItem` 首次扫描到空槽位即误判"物品不在"。修复：`takeItem`/`refillLapisTake`/`fetchDummyTake`/`returnPut` 的无匹配中止增加 `MENU_CONTENT_GRACE_TICKS = 5` 的内容同步宽限（宽限期内继续等待而不是中止）。诊断增强：每次阶段切换写游戏日志（`automation phase: X -> Y`），所有中止消息附带阶段名（`quick-enchant.run.phase` 中英双语），下次日志可精确还原状态机轨迹。
 15. **修复 DUMMY_VERIFY 误报校验失败**（2026-09-26，日志 4 阶段轨迹定位）：阶段日志显示整条 RNG 链路正确（32 次扔物定位、place 预测 7 tick 校验通过），失败在 dummy 附魔后的校验——预测模型错误：dummy 附魔执行后物品已带魔咒，服务端 `isEnchantable()` 为 false，`slotsChanged` 会把三档供价**全部清零**（dummy 为书时还会转成附魔书、连 ENCHANTABLE 组件都没有），而预测按"未附魔 dummy + 新种子"算出非零供价，必然不符。修复：DUMMY_VERIFY 改为校验"三档 cost 全 0、clue 全 -1"（证明 dummy 附魔确实执行）；种子是否推进到目标值由 VERIFY_SWAPPED（换入真物品后按 realXpSeed 预测）真正校验。Plan 记录中移除 postDummyPrediction。
 16. **修复"附魔完一把后跳过剩余全部"**（2026-09-26，日志 5 阶段轨迹确认）：第一件完整成功（扔物定位、dummy、换入、附魔、校验、放回原盒、前瞻窗口扔物全部通过），第二件 RESOLVE 重扫时误报无物——根因：附魔完的镐被放回原盒后，盒内变成"9 未附魔 + 1 已附魔"，而盒分类函数是"全部内容物必须是可附魔未附魔"的全有全无规则，一件已附魔回流物品就把整个盒子归为 OTHER。修复：分类规则放宽为"含至少一件可附魔未附魔物品即物品盒（已附魔回流物品视为杂物）；无则含青金石即青金石盒"。取物扫描本就逐个检查 isEnchantableCandidate，不会误取已附魔的回流物品。
-17. **待人工验证**：需要在真实 26.1.2 环境（装 malilib + quickshulker）实测：破解流程、自动取放、讲台红石电路时序、服务端真实服务器兼容性。
+17. **v1.1 流程与体验重构**（2026-09-26）：
+    - **手动盒选择**：新增 `BoxSelectScreen`——背包样式界面（主背包 3×9 + 快捷栏 + 副手），Shift+左键标记/取消标记待附魔盒；只有"含至少一件可附魔且未附魔物品"的潜影盒可标记（忽略不可附魔/已附魔物品），悬停显示盒内有效物品摘要；背包下方确认按钮。
+    - **流程重构**：`/qeprepare`（打开盒选择，异常结束时继承上次标记）→ 附魔选择（同 id 物品自动预填上次全部参数）→ 破解阶段（HUD 提示 /qecrackrng + "在附魔台附魔任意物品"破解附魔种子）→ `/qestart` 开始。移除旧的破解后自动弹窗。
+    - **右上角常驻 HUD**：26.1.2 Fabric API 的新 `HudElementRegistry.addLast` + `HudElement.extractRenderState(GuiGraphicsExtractor, DeltaTracker)`（旧 HudRenderCallback 已移除）；显示玩家 RNG/附魔种子破解状态 + 当前阶段下一步提示 + 运行进度。
+    - **状态持久化**：`FlowState`（config/quick-enchant-state.json）——盒子选择 + 每物品附魔配置（mode/enchId/level）；/qestart 时即写入"未正常结束"+ 盒选择（崩溃安全），正常结束清除盒选择，异常保留。
+    - **版本号**：基础版本升至 1.1.0。
+    - 技术要点：Screen 的 `minecraft` 字段在构造器中为 null（init 时注入）→ 物品列表计算延迟到首次 init；鼠标事件为 `mouseClicked(MouseButtonEvent, boolean)`（shift 经 `event.hasShiftDown()`）；附魔注册表 26.1.2 已不在 `BuiltInRegistries`（经 `registryAccess().lookupOrThrow(Registries.ENCHANTMENT)` 访问，序列化用 `holder.unwrapKey().identifier()`）。
+18. **修复 /qeprepare 后选择界面未显示**（2026-09-26，日志 6）：命令在聊天屏的按键处理过程中执行，`prepare()` 里的 `setScreen(BoxSelectScreen)` 会被聊天提交流程的后续处理（或热键输入上下文）顶掉。修复：`setScreen` 经 `mc.execute()` 延迟到输入处理完全结束后执行；`prepare()` 与 `BoxSelectScreen.init()` 增加日志（打开/继承/标记数），下次日志可确认界面确实初始化。
+19. **v1.2 三项功能**（2026-09-26）：
+    - **盒选择右侧内容预览**：BoxSelectScreen 中左键（不按 Shift）潜影盒切换右侧预览面板——9×3 网格渲染盒内物品，不可附魔/已附魔的物品盖红色半透明遮罩标记为忽略，底部显示有效物品数；再点同盒关闭。
+    - **附魔可行性实时测试**：EnchantSelectScreen 每次编辑（切物品/切附魔/改等级/exactly）对当前选中物品做可行性探测——随机玩家起始种子 + 从 n=0..1024 扫描（n 扔物 → dummy 写种子的标准流程），按配置的书架范围（讲台可调 0-15，否则 15）×3 槽位检查供价是否满足当前谓词与等级约束；上限内无解时界面下方红字"所选附魔大概率无法满足"，可行则不显示。
+    - **每 tick 最大扔出数**：新配置 `maxThrowsPerTick`（ConfigInteger 1-256，默认 8）替代原 itemThrowsPerTick（0.05-64），多扔同组物品本就安全（每物品独立 4 步 RNG 记账）。
+    - 版本升至 1.2.0。
+20. **修复真机 PLACE_REAL 概率超时**（2026-09-26，日志 7 定位）：轨迹显示 PLACE_REAL 有 2 tick（正常）、54 tick（服务器响应慢）和 200 tick 超时三种形态；等待期间引擎**每 tick 重发一次容器点击**，而 26.1.2 服务端对 stateId 落后的点击会 `suppressRemoteUpdates → clicked → broadcastFullState` 全量重同步——每秒 200 次全量广播既浪费带宽又把客户端的本地预测反复回滚，形成自我放大故障。修复：所有"点击直到生效"的取放阶段（placeLapis/placeFirst/placeReal/takeDummyOut/dropDummy/takeItemOut）加 `CLICK_RETRY_TICKS = 40` 节流门（首 tick 点击，之后每 40 tick 重试，200 tick 窗口内最多 5 次），等待期间依赖服务端同步生效；正常路径仍靠本地预测 2 tick 推进。
+21. **待人工验证**：需要在真实 26.1.2 环境（装 malilib + quickshulker）实测：破解流程、自动取放、讲台红石电路时序、服务端真实服务器兼容性。
 
 ## 已知限制 / 风险
 

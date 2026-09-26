@@ -33,6 +33,7 @@ public class BoxSelectScreen extends Screen {
     private final List<SlotRect> slotRects = new ArrayList<>();
     private final Set<Integer> marked = new HashSet<>();
     private final boolean inherited;
+    private int previewInvSlot = -1;
 
     public BoxSelectScreen(boolean inherited) {
         super(Component.translatable("quick-enchant.flow.boxTitle"));
@@ -71,14 +72,19 @@ public class BoxSelectScreen extends Screen {
 
     @Override
     public boolean mouseClicked(net.minecraft.client.input.MouseButtonEvent event, boolean doubleClick) {
-        if (event.button() == 0 && event.hasShiftDown()) {
+        if (event.button() == 0) {
             for (SlotRect rect : slotRects) {
                 if (event.x() >= rect.x() && event.x() < rect.x() + 16 && event.y() >= rect.y() && event.y() < rect.y() + 16) {
                     ItemStack stack = this.minecraft.player.getInventory().getItem(rect.invSlot());
-                    if (isValidItemBox(stack)) {
-                        if (!marked.remove(rect.invSlot())) {
-                            marked.add(rect.invSlot());
+                    if (event.hasShiftDown()) {
+                        if (isValidItemBox(stack)) {
+                            if (!marked.remove(rect.invSlot())) {
+                                marked.add(rect.invSlot());
+                            }
                         }
+                    } else if (InventoryScanner.isShulkerBox(stack)) {
+                        // plain left-click: toggle the right-side content preview
+                        previewInvSlot = previewInvSlot == rect.invSlot() ? -1 : rect.invSlot();
                     }
                     return true;
                 }
@@ -135,6 +141,37 @@ public class BoxSelectScreen extends Screen {
 
             if (hovered) {
                 this.hoveredSlot = rect.invSlot();
+            }
+        }
+
+        // right-side content preview of the left-clicked box
+        if (previewInvSlot >= 0 && this.minecraft.player != null) {
+            ItemStack previewStack = this.minecraft.player.getInventory().getItem(previewInvSlot);
+            if (!InventoryScanner.isShulkerBox(previewStack)) {
+                previewInvSlot = -1;
+            } else {
+                List<ItemStack> contents = InventoryScanner.readBoxContents(previewStack);
+                int px = this.width - 178;
+                int py = 66;
+                graphics.fill(px - 6, py - 14, px + 170, py + 96, 0xC0101010);
+                graphics.text(this.font, previewStack.getHoverName(), px, py - 11, 0xFFFFFF, true);
+                int valid = 0;
+                for (int i = 0; i < contents.size() && i < 27; i++) {
+                    ItemStack content = contents.get(i);
+                    int cx = px + (i % 9) * 18;
+                    int cy = py + (i / 9) * 18;
+                    graphics.fill(cx - 1, cy - 1, cx + 17, cy + 17, SLOT_BORDER);
+                    graphics.fill(cx, cy, cx + 16, cy + 16, SLOT_BG);
+                    graphics.item(content, cx, cy);
+                    if (InventoryScanner.isEnchantableCandidate(content)) {
+                        valid++;
+                    } else {
+                        // ignored: not enchantable or already enchanted
+                        graphics.fill(cx, cy, cx + 16, cy + 16, 0x70A00000);
+                    }
+                }
+                graphics.text(this.font, Component.translatable("quick-enchant.flow.previewValid", valid),
+                        px, py + 58, 0xFF80FF80, true);
             }
         }
 

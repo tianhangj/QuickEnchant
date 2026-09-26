@@ -98,8 +98,6 @@
 	"quick-enchant.config.generic.comment.maxEnchantLevels": "Maximum enchantment table level (slot cost) to consider",
 	"quick-enchant.config.generic.name.maxEnchantSlot": "Max Enchant Slot",
 	"quick-enchant.config.generic.comment.maxEnchantSlot": "Highest enchantment table slot (1-3) the automation may click",
-	"quick-enchant.config.generic.name.itemThrowsPerTick": "Item Throws Per Tick",
-	"quick-enchant.config.generic.comment.itemThrowsPerTick": "How many items per tick may be thrown while advancing the RNG",
 	"quick-enchant.config.generic.name.openSelectGui": "Open Select GUI",
 	"quick-enchant.config.generic.comment.openSelectGui": "Open the enchantment selection screen",
 	"quick-enchant.config.generic.name.confirmExecute": "Confirm Execute",
@@ -158,5 +156,9 @@
 	"quick-enchant.flow.statusXpSeed": "XP seed: %s",
 	"quick-enchant.flow.statusCracked": "cracked",
 	"quick-enchant.flow.statusUncracked": "uncracked",
-	"quick-enchant.flow.statusRunning": "Running item %s/%s"
+	"quick-enchant.flow.statusRunning": "Running item %s/%s",
+	"quick-enchant.flow.previewValid": "Valid items: %s",
+	"quick-enchant.flow.infeasible": "The selected enchantments are most likely unobtainable",
+	"quick-enchant.config.generic.name.maxThrowsPerTick": "Max Throws Per Tick",
+	"quick-enchant.config.generic.comment.maxThrowsPerTick": "Maximum items thrown per tick while advancing the RNG (1-256, throwing multiple from one stack per tick is safe)"
 }

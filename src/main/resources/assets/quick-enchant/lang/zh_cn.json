@@ -158,5 +158,9 @@
 	"quick-enchant.flow.statusXpSeed": "附魔种子: %s",
 	"quick-enchant.flow.statusCracked": "已破解",
 	"quick-enchant.flow.statusUncracked": "未破解",
-	"quick-enchant.flow.statusRunning": "自动附魔中 第 %s/%s 件"
+	"quick-enchant.flow.statusRunning": "自动附魔中 第 %s/%s 件",
+	"quick-enchant.flow.previewValid": "有效物品: %s",
+	"quick-enchant.flow.infeasible": "所选附魔大概率无法满足",
+	"quick-enchant.config.generic.name.maxThrowsPerTick": "每Tick最大扔出数",
+	"quick-enchant.config.generic.comment.maxThrowsPerTick": "推进随机数时每 tick 最多扔出的物品数（1-256，同一组连扔安全）"
 }

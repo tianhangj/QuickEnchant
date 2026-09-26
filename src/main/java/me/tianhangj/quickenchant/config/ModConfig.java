@@ -66,8 +66,8 @@ public class ModConfig implements IConfigHandler {
                 "Maximum enchantment table level (slot cost) to consider").apply(GENERIC_KEY);
         public static final ConfigInteger MAX_ENCHANT_SLOT = new ConfigInteger("maxEnchantSlot", 3, 1, 3,
                 "Highest enchantment table slot (1-3) the automation may click").apply(GENERIC_KEY);
-        public static final ConfigDouble ITEM_THROWS_PER_TICK = new ConfigDouble("itemThrowsPerTick", 1.0, 0.05, 64.0,
-                "How many items per tick may be thrown while advancing the RNG").apply(GENERIC_KEY);
+        public static final ConfigInteger MAX_THROWS_PER_TICK = new ConfigInteger("maxThrowsPerTick", 8, 1, 256,
+                "Maximum number of items that may be thrown per tick while advancing the RNG (multiple throws from one stack in one tick are safe)").apply(GENERIC_KEY);
 
         public static final ConfigHotkey OPEN_SELECT_GUI = new ConfigHotkey("openSelectGui", "",
                 "Open the enchantment selection screen").apply(GENERIC_KEY);
@@ -88,7 +88,7 @@ public class ModConfig implements IConfigHandler {
                 MIN_ENCHANT_LEVELS,
                 MAX_ENCHANT_LEVELS,
                 MAX_ENCHANT_SLOT,
-                ITEM_THROWS_PER_TICK,
+                MAX_THROWS_PER_TICK,
                 OPEN_SELECT_GUI,
                 CONFIRM_EXECUTE,
                 ABORT_AUTOMATION

@@ -58,7 +58,7 @@ public abstract class ItemThrowTask extends SimpleTask {
 
     @Override
     protected void onTick() {
-        itemThrowsAllowedThisTick += Configs.getItemThrowsPerTick();
+        itemThrowsAllowedThisTick += Configs.getMaxThrowsPerTick();
 
         while (((flags & FLAG_URGENT) != 0 || itemThrowsAllowedThisTick >= 1) && sentItemThrows < totalItemsToThrow) {
             itemThrowsAllowedThisTick--;
