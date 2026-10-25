@@ -16,6 +16,8 @@ public class Configs {
     public static PlayerRandCracker.CrackState playerCrackState = PlayerRandCracker.CrackState.UNCRACKED;
     public static boolean enchantingPrediction = false;
     public static boolean playerRNGMaintenance = true;
+    /** Diagnostic mode; see {@link ModConfig.Generic#DEBUG} and {@code QEDebug}. */
+    public static boolean debug = false;
 
     // ===== tunables (persisted via ModConfig) =====
     private static int maxEnchantItemThrows = 64 * 256;
@@ -99,5 +101,6 @@ public class Configs {
         setMaxThrowsPerTick(ModConfig.Generic.MAX_THROWS_PER_TICK.getIntegerValue());
         enchantingPrediction = ModConfig.Generic.ENCHANTING_PREDICTION.getBooleanValue();
         playerRNGMaintenance = ModConfig.Generic.PLAYER_RNG_MAINTENANCE.getBooleanValue();
+        debug = ModConfig.Generic.DEBUG.getBooleanValue();
     }
 }

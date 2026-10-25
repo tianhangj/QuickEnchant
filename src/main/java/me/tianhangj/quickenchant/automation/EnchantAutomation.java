@@ -13,6 +13,7 @@ import me.tianhangj.quickenchant.predicate.EnchantPredicate;
 import me.tianhangj.quickenchant.task.ItemThrowTask;
 import me.tianhangj.quickenchant.task.LongTask;
 import me.tianhangj.quickenchant.task.TaskManager;
+import me.tianhangj.quickenchant.util.QEDebug;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
@@ -213,9 +214,27 @@ public class EnchantAutomation extends LongTask {
                     .append(Component.translatable("quick-enchant.run.phase", automation.phase));
             ClientCommandHelper.sendError(message);
             QuickEnchant.LOGGER.info("automation aborted: {} phase {}", reasonKey, automation.phase);
+            QEDebug.dump("abort " + reasonKey + " in phase " + automation.phase,
+                    "abort-" + automation.phase + "-" + System.currentTimeMillis() + ".txt");
             automation.cleanup();
             automation._break();
         }
+    }
+
+    /** One-line phase/plan summary, used by the debug snapshot and {@code /qedbg state}. */
+    public String debugSummary() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("phase=").append(phase)
+                .append(" phaseTicks=").append(phaseTicks)
+                .append(" queue=").append(queueIndex + 1).append('/').append(queue.size())
+                .append(" boxSlot=").append(boxSlot)
+                .append(" dummyInvSlot=").append(dummyInvSlot)
+                .append(" dummyBoxSlot=").append(dummyBoxSlot)
+                .append(" throwTask=").append(throwTask == null ? "none" : "active");
+        if (plan != null) {
+            sb.append("\nplan: ").append(QEDebug.plan(plan));
+        }
+        return sb.toString();
     }
 
     private EnchantAutomation(List<TypeConfig> configs, List<Integer> selectedSlots) {
@@ -365,6 +384,7 @@ public class EnchantAutomation extends LongTask {
         if (QuickEnchant.LOGGER.isInfoEnabled()) {
             QuickEnchant.LOGGER.info("automation phase: {} -> {} (after {} ticks)", phase, next, phaseTicks);
         }
+        QEDebug.log("phase %s -> %s after %d ticks | %s", phase, next, phaseTicks, QEDebug.seedState());
         phase = next;
         phaseTicks = 0;
     }
@@ -454,6 +474,10 @@ public class EnchantAutomation extends LongTask {
             skippedItems.add(item);
             return;
         }
+
+        QEDebug.log("resolved plan for %s (queue %d/%d, boxSlot=%d, bookshelves=%d..%d actual=%d):\n%s",
+                QEDebug.stack(new ItemStack(item)), queueIndex + 1, queue.size(), boxSlot,
+                min, max, actual, QEDebug.plan(plan));
 
         if (plan.dummySlot() != EnchantSolver.NO_DUMMY) {
             if (!new ItemStack(dummyItem).has(DataComponents.ENCHANTABLE)) {
@@ -606,16 +630,19 @@ public class EnchantAutomation extends LongTask {
 
     private void doThrowing(LocalPlayer player, int count, Phase next) {
         if (count <= 0) {
+            QEDebug.log("throwing skipped (count=0) in %s; the table seed is unchanged", phase);
             resetPhase(next);
             return;
         }
 
         if (throwTask == null) {
+            QEDebug.log("throwing %d items starting from playerSeed=0x%s", count, QEDebug.hex(PlayerRandCracker.getSeed()));
             PlayerRandCracker.throwSlotFilter = this::isSafeThrowSlot;
             EnchantmentCracker.setCurrentlyThrowingItems(true);
             throwTask = new ItemThrowTask(count, ItemThrowTask.FLAG_WAIT_FOR_ITEMS) {
                 @Override
                 protected void onUnexpectedRNGCall(PlayerRandCracker.RNGCallType callType) {
+                    QEDebug.log("throwing aborted: unexpected %s call, playerSeed=0x%s", callType, QEDebug.hex(PlayerRandCracker.getSeed()));
                     ClientCommandHelper.sendError(Component.translatable("commands.cenchant.unexpectedCall", callType.getResetMessage()));
                     EnchantAutomation.abort("quick-enchant.run.aborted");
                 }
@@ -623,11 +650,23 @@ public class EnchantAutomation extends LongTask {
                 @Override
                 protected void onFailedToThrowItem(PlayerRandCracker.ThrowItemsResult throwItemsResult) {
                     if (throwItemsResult.getType() != PlayerRandCracker.ThrowItemsResult.Type.NOT_ENOUGH_ITEMS) {
+                        QEDebug.log("throwing failed: %s", throwItemsResult.getType());
                         throwItemsResult.sendErrorMessage();
                         EnchantAutomation.abort("quick-enchant.run.aborted");
                     }
                     // NOT_ENOUGH_ITEMS with FLAG_WAIT_FOR_ITEMS: keep waiting until a whitelist
                     // stack has a spare item (thrown items are picked back up or restocked)
+                }
+
+                @Override
+                protected void onItemThrown(int current, int total) {
+                    QEDebug.log("thrown %d/%d, playerSeed=0x%s", current, total, QEDebug.hex(PlayerRandCracker.getSeed()));
+                }
+
+                @Override
+                protected void onItemSpawn(net.minecraft.network.protocol.game.ClientboundAddEntityPacket packet) {
+                    QEDebug.log("server confirmed item spawn at [%.2f %.2f %.2f]".formatted(
+                            (float) packet.getX(), (float) packet.getY(), (float) packet.getZ()));
                 }
             };
             throwTask.initialize();
@@ -637,6 +676,7 @@ public class EnchantAutomation extends LongTask {
         throwTask.body();
         throwTask.unscheduleDelay();
         if (throwTask.isCompleted()) {
+            QEDebug.log("throwing finished: %d items, playerSeed=0x%s", count, QEDebug.hex(PlayerRandCracker.getSeed()));
             throwTask.onCompleted();
             throwTask = null;
             PlayerRandCracker.throwSlotFilter = null;
@@ -825,9 +865,14 @@ public class EnchantAutomation extends LongTask {
         }
         int slot = plan.dummySlot();
         if (!canAfford(player, menu, slot)) {
+            QEDebug.log("cannot afford the dummy enchant: slot=%d costs=%s lapis=%s xpLevel=%d",
+                    slot, java.util.Arrays.toString(menu.costs), QEDebug.stack(menu.getSlot(1).getItem()),
+                    player.experienceLevel);
             abort("quick-enchant.run.cantAfford");
             return;
         }
+        QEDebug.log("enchanting dummy: slot=%d %s, playerSeed=0x%s -> dummy table seed becomes out(now+1)",
+                slot, QEDebug.menuState(menu), QEDebug.hex(PlayerRandCracker.getSeed()));
         Minecraft.getInstance().gameMode.handleInventoryButtonClick(menu.containerId, slot);
         PlayerRandCracker.onEnchantedItem();
         resetPhase(Phase.DUMMY_VERIFY);
@@ -849,9 +894,14 @@ public class EnchantAutomation extends LongTask {
             return;
         }
         if (!EnchantmentCracker.tableMatchesPrediction(menu, prediction)) {
+            QEDebug.log("VERIFY FAILED in %s after %d ticks\n  expected: %s\n  actual:   %s\n  diagnosis: %s",
+                    phase, phaseTicks, QEDebug.prediction(prediction), QEDebug.menuState(menu),
+                    QEDebug.diagnose(menu, prediction));
+            QEDebug.dump("verification failed in " + phase, "verify-failed-" + phase + "-" + System.currentTimeMillis() + ".txt");
             abort("quick-enchant.run.verifyFailed");
             return;
         }
+        QEDebug.log("%s verified after %d ticks: %s", phase, phaseTicks, QEDebug.menuState(menu));
         resetPhase(next);
     }
 
@@ -867,10 +917,15 @@ public class EnchantAutomation extends LongTask {
         }
         for (int i = 0; i < 3; i++) {
             if (menu.costs[i] != 0 || menu.enchantClue[i] != -1 || menu.levelClue[i] != -1) {
+                QEDebug.log("DUMMY VERIFY FAILED after %d ticks: the slot-0 item still has offers, "
+                                + "so the dummy enchant did not clear them\n  actual: %s",
+                        phaseTicks, QEDebug.menuState(menu));
+                QEDebug.dump("dummy verify failed", "dummy-verify-failed-" + System.currentTimeMillis() + ".txt");
                 abort("quick-enchant.run.verifyFailed");
                 return;
             }
         }
+        QEDebug.log("dummy enchant confirmed after %d ticks (offers cleared)", phaseTicks);
         resetPhase(Phase.TAKE_DUMMY_OUT);
     }
 
@@ -904,6 +959,7 @@ public class EnchantAutomation extends LongTask {
         // the drop consumes 4 player RNG steps on purpose: mark it maintained and suppress the
         // "unexpected call" abort while the click is processed
         if (clickGate()) {
+            QEDebug.log("dropping the enchanted dummy (consumes 4 RNG steps): %s", QEDebug.seedState());
             droppingDummy = true;
             EnchantmentCracker.setCurrentlyThrowingItems(true);
             Minecraft.getInstance().gameMode.handleContainerInput(menu.containerId, -999, 0, ContainerInput.PICKUP, player);
@@ -918,9 +974,15 @@ public class EnchantAutomation extends LongTask {
         }
         int slot = plan.realSlot();
         if (!canAfford(player, menu, slot)) {
+            QEDebug.log("cannot afford the real enchant: slot=%d costs=%s lapis=%s xpLevel=%d",
+                    slot, java.util.Arrays.toString(menu.costs), QEDebug.stack(menu.getSlot(1).getItem()),
+                    player.experienceLevel);
             abort("quick-enchant.run.cantAfford");
             return;
         }
+        QEDebug.log("enchanting real item: slot=%d %s, expected list %s, playerSeed=0x%s -> consumes 1 nextInt",
+                slot, QEDebug.menuState(menu), QEDebug.enchantments(plan.realList()),
+                QEDebug.hex(PlayerRandCracker.getSeed()));
         Minecraft.getInstance().gameMode.handleInventoryButtonClick(menu.containerId, slot);
         PlayerRandCracker.onEnchantedItem();
         resetPhase(Phase.ENCHANT_WAIT);
@@ -932,6 +994,8 @@ public class EnchantAutomation extends LongTask {
         }
         ItemStack enchanted = menu.getSlot(0).getItem();
         if (!enchanted.isEmpty() && enchanted.isEnchanted()) {
+            QEDebug.log("real enchant applied after %d ticks: %s, new xpSeed=%s",
+                    phaseTicks, QEDebug.stack(enchanted), QEDebug.seedState());
             resetPhase(Phase.ENCHANT_VERIFY);
         }
     }
@@ -946,9 +1010,13 @@ public class EnchantAutomation extends LongTask {
                 actual.add(new EnchantmentInstance(holder, enchanted.getEnchantments().getLevel(holder))));
         List<EnchantmentInstance> expected = plan.realList();
         if (!sameEnchantments(actual, expected)) {
+            QEDebug.log("ENCHANT MISMATCH: item=%s\n  expected: %s\n  actual:   %s",
+                    QEDebug.stack(enchanted), QEDebug.enchantments(expected), QEDebug.enchantments(actual));
+            QEDebug.dump("enchant mismatch", "enchant-mismatch-" + System.currentTimeMillis() + ".txt");
             abort("quick-enchant.run.enchantMismatch");
             return;
         }
+        QEDebug.log("enchant verified: %s", QEDebug.enchantments(actual));
         resetPhase(Phase.TAKE_ITEM_OUT);
     }
 

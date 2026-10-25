@@ -2,6 +2,7 @@ package me.tianhangj.quickenchant;
 
 import me.tianhangj.quickenchant.automation.EnchantAutomation;
 import me.tianhangj.quickenchant.command.CrackRNGCommand;
+import me.tianhangj.quickenchant.command.DebugCommand;
 import me.tianhangj.quickenchant.command.QECommands;
 import me.tianhangj.quickenchant.config.FlowState;
 import me.tianhangj.quickenchant.config.ModConfig;
@@ -30,6 +31,7 @@ public class QuickEnchant implements ClientModInitializer {
 		ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
 			CrackRNGCommand.register(dispatcher);
 			QECommands.register(dispatcher);
+			DebugCommand.register(dispatcher);
 		});
 
 		fi.dy.masa.malilib.event.InitializationHandler.getInstance().registerInitializationHandler(new fi.dy.masa.malilib.interfaces.IInitializationHandler() {

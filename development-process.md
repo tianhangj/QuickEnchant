@@ -44,7 +44,7 @@
 - clientcommands、quickshulker、malilib 全部为 Mojang 官方映射，主项目隐式 mojmap，移植代码可直接编译。
 - loom 1.17 已移除 `modImplementation`，mod 依赖统一用 `implementation`（loom 自动识别并重映射）。
 - quickshulker 打开背包内潜影盒是服务端权威行为：运行环境（服务器或单人客户端）必须安装 quickshulker。
-- gradle 跑在本机 `D:/games/Minecraft/java/jdk-25.0.3+9`（loom 1.17 需要 21+，MC 26.1.2 需要 25）。
+- gradle 跑在本机 `D:/games/Minecraft/java/jdk-25.0.4.1+1`（loom 1.17 需要 21+，MC 26.1.2 需要 25）。
 
 # 工作记录
 
@@ -82,8 +82,43 @@
 20. **修复真机 PLACE_REAL 概率超时**（2026-09-26，日志 7 定位）：轨迹显示 PLACE_REAL 有 2 tick（正常）、54 tick（服务器响应慢）和 200 tick 超时三种形态；等待期间引擎**每 tick 重发一次容器点击**，而 26.1.2 服务端对 stateId 落后的点击会 `suppressRemoteUpdates → clicked → broadcastFullState` 全量重同步——每秒 200 次全量广播既浪费带宽又把客户端的本地预测反复回滚，形成自我放大故障。修复：所有"点击直到生效"的取放阶段（placeLapis/placeFirst/placeReal/takeDummyOut/dropDummy/takeItemOut）加 `CLICK_RETRY_TICKS = 40` 节流门（首 tick 点击，之后每 40 tick 重试，200 tick 窗口内最多 5 次），等待期间依赖服务端同步生效；正常路径仍靠本地预测 2 tick 推进。
 21. **待人工验证**：需要在真实 26.1.2 环境（装 malilib + quickshulker）实测：破解流程、自动取放、讲台红石电路时序、服务端真实服务器兼容性。
 
+## 2026-10-25
+
+22. **修复"dummy 方案在零预投掷时必然 VERIFY_SWAPPED 失败"**（日志 9、10 定位，源码证明）：
+    - **症状**：日志 9（21:52:26）与日志 10（22:41:44）的轨迹完全一致——`THROWING` 阶段仅 2 tick（方案 `itemThrows == 0`）→ `DUMMY` → `DUMMY_VERIFY` 通过 → `TAKE_DUMMY_OUT` → `DROP_DUMMY` → `PLACE_REAL` → `VERIFY_SWAPPED` 校验失败中止。日志 7 的多次成功运行全部是 `itemThrows > 0` 的方案。
+    - **根因**：`EnchantSolver.solve` 用 `if (times == 0) realXpSeed = currentXpSeed;` 推导"dummy 附魔后的表格种子"。但服务端 `EnchantmentMenu.clickMenuButton` 对**每一次**成功附魔都会调用 `Player.onEnchantmentPerformed`（Player.java:1492），该方法执行 `enchantmentSeed = random.nextInt()`——**dummy 附魔同样消耗一次 nextInt**。因此 dummy 之后的表格种子恒为 `out(s + 4n + 1)`（n = 预投掷数），只有在"根本没做 dummy"时才等于 `currentXpSeed`。原实现在 `times == 0` 时返回了 dummy 之前的种子，于是 `placePrediction`（用 `currentXpSeed` 预测 dummy，正确）通过 `VERIFY_FIRST`，而 `swapPrediction`（也用 `currentXpSeed` 预测真物品，错误）在 `VERIFY_SWAPPED` 必然不符。
+    - **修复**：`solve` 改为恒用 `Rand(playerSeed).advance(times*4).nextBits(32)` 计算 dummy 后的种子（含 `times == 0` 即 `out(s+1)`），无 dummy 分支仍用 `currentXpSeed`；前瞻的 `baseSteps = 4*itemThrows + 5` 本就按此记账（+1 dummy 附魔、+4 dummy 丢弃），与新逻辑一致。
+    - **回归测试**：`RngMirrorTest` 新增 `dummyEnchantConsumesOneNextIntEvenWithoutThrows`（dummy 附魔恰好推进 1 次 nextInt，且结果不得等于 dummy 前种子）与 `lookaheadBaseStepsAccountsForDummyAndDrop`（预投掷 + dummy 附魔 + dummy 丢弃 + 窗口投掷的完整序列与积分公式对拍），5/5 通过。
+23. **新增 debug 开关与诊断输出**：
+    - **配置**：`ModConfig.Generic.DEBUG`（id `debug`，默认关，位于 Generic 列表 `playerRNGMaintenance` 之后），`Configs.debug` 镜像；中英语言键齐备，可在配置界面直接开关，**切换即时生效**（`QEDebug.enabled()` 直读 malilib 值，无需重载配置）。
+    - **`QEDebug`（util）**：全部诊断输出的统一入口，环形缓冲保留最近 600 行供 `/qedebug history` 与快照引用；含种子/物品/附魔/预测的格式化、`diagnose()` 逐槽位差异分析（区分"仅 cost 不同 = 种子错"、"cost 相同但 clue 不同 = 附魔列表错"、"cost 全 0 = 物品不可附魔或菜单未同步"）、`snapshot()` 全量状态（种子、世界、玩家、附魔台/讲台坐标、实际书架数、自动化阶段与队列进度、当前菜单三档、背包（含潜影盒内容）+ 最近 150 行诊断）、以及写入 `<gameDir>/quick-enchant-debug/`。
+    - **输出覆盖**：阶段切换（附种子状态）、完整计划（投掷数/栏位/书架/两个种子/真物品附魔表/place 与 swap 两个预测/窗口投掷）、求解器搜索参数与失败归因计数（dummy 列表空/真列表空/cost 越界/谓词不符）、前瞻命中或未命中的窗口投掷数、每次 RNG 推进（`DROP_ITEM` 4 步、`ENCHANTING` 1 步及其产生的表格种子值）、逐次投掷与服务器确认、附魔前后状态与结果比对、三处校验的成功详情与失败差异。**失败/中止时自动落盘快照**（`verify-failed-*`、`dummy-verify-failed-*`、`enchant-mismatch-*`、`abort-*`）。
+    - **`/qedebug` 命令**：`on|off`（切换并持久化）、`state`（当前种子/菜单/阶段/计划）、`dump`（立即写快照并回显路径）、`history [行数]`、`menu`（用当前 seed + 实际书架数重算预测并与界面逐槽位比对）、`seed [值]`、`xpseed [值]`（读取/强制覆盖，用于离线验证某个种子会给出什么）。所有子命令在 debug 关闭时拒绝执行，避免正常游玩时被误用。
+    - 版本：`1.2.0-dev.17` 构建通过，`RngMirrorTest` 5/5 通过。
+24. **去掉 QuickShulker 的版本限制**：`fabric.mod.json` 的 `depends` 原为 `"quickshulker": ">=3.0.0"`，改为 `"quickshulker": "*"`——仍保留依赖关系（`BoxOps` 直接调用其 API，完全移除会导致运行时 `NoClassDefFoundError`），但不再限制版本。`build.gradle` 里的 `quickshulker_version` 只是编译期依赖（决定了用什么版本的 API 编译），不影响运行时校验，保持不变。
+
 ## 已知限制 / 风险
 
 - 游戏内行为未在本开发环境实测（无法启动真实客户端进行完整联机流程），需要用户配合验证。
 - 讲台方案要求书页 ≥ 目标书架数 + 1，红石电路由用户搭建（页码 x ↔ x 书架）。
 - 若服务器存在未镜像的玩家 RNG 消耗（其他 mod、Paper 服务端），校验机制会终止并警告。
+
+## 调试方法（反馈问题用）
+
+1. 配置界面打开 **调试模式**（Generic → Debug），或游戏内 `/qedebug on`。
+2. 复现问题。失败时日志里会出现 `[qe-debug]` 前缀的完整轨迹，并自动在
+   `<gameDir>/quick-enchant-debug/` 写出快照文件（形如 `abort-VERIFY_SWAPPED-<时间戳>.txt`）。
+3. 把 `logs/latest.log` 与对应快照文件一并附上即可定位。
+
+常用命令：
+
+| 命令 | 作用 |
+| --- | --- |
+| `/qedebug on` / `off` | 开关调试输出（持久化到配置） |
+| `/qedebug state` | 当前两个种子、菜单三档、自动化阶段与队列进度、当前计划 |
+| `/qedebug menu` | 用当前附魔种子 + 实际书架数重算预测，并与界面逐槽位比对（判断种子是否正确） |
+| `/qedebug dump` | 立即写出全量快照并回显路径 |
+| `/qedebug history [行数]` | 回看最近的诊断行 |
+| `/qedebug seed [值]` / `/qedebug xpseed [值]` | 读取或强制覆盖玩家种子 / 附魔种子（十进制或 0x 十六进制） |
+
+`/qedebug menu` 的差异提示是关键判据：**仅 cost 不同** → 附魔种子不对；**cost 相同但 clue 不同** → 附魔列表（物品或种子）不对；**cost 全 0** → 物品不可附魔或菜单尚未同步。

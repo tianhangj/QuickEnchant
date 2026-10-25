@@ -54,6 +54,15 @@ public class ModConfig implements IConfigHandler {
         public static final ConfigBoolean PLAYER_RNG_MAINTENANCE = new ConfigBoolean("playerRNGMaintenance", true,
                 "Keep the cracked player RNG maintained instead of resetting it on known RNG calls").apply(GENERIC_KEY);
 
+        /**
+         * Diagnostic mode. When enabled every phase transition, plan, RNG step and verification
+         * result is logged with the concrete values needed to reproduce the run offline, and a
+         * snapshot file is written to {@code <gameDir>/quick-enchant-debug/} whenever a
+         * verification fails or the automation aborts.
+         */
+        public static final ConfigBoolean DEBUG = new ConfigBoolean("debug", false,
+                "Log full automation state (plans, RNG steps, table predictions) and write snapshot files on failure. Use this to reproduce and report problems").apply(GENERIC_KEY);
+
         public static final ConfigInteger MAX_ENCHANT_ITEM_THROWS = new ConfigInteger("maxEnchantItemThrows", 64 * 256, 0, 1000000,
                 "Maximum number of items that may be thrown while searching for the desired enchantments").apply(GENERIC_KEY);
         public static final ConfigInteger MIN_ENCHANT_BOOKSHELVES = new ConfigInteger("minEnchantBookshelves", 0, 0, 15,
@@ -82,6 +91,7 @@ public class ModConfig implements IConfigHandler {
                 LECTERN_ADJUSTMENT,
                 ENCHANTING_PREDICTION,
                 PLAYER_RNG_MAINTENANCE,
+                DEBUG,
                 MAX_ENCHANT_ITEM_THROWS,
                 MIN_ENCHANT_BOOKSHELVES,
                 MAX_ENCHANT_BOOKSHELVES,

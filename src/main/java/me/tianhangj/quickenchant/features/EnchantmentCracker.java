@@ -17,6 +17,7 @@ import me.tianhangj.quickenchant.task.OneTickTask;
 import me.tianhangj.quickenchant.task.SimpleTask;
 import me.tianhangj.quickenchant.task.TaskManager;
 import me.tianhangj.quickenchant.util.MultiVersionCompat;
+import me.tianhangj.quickenchant.util.QEDebug;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
@@ -214,6 +215,16 @@ public class EnchantmentCracker {
     public static int getCurrentXpSeed() {
         return possibleXPSeeds.iterator().next();
     }
+
+    /**
+     * Force the cracked table seed. Debug only: used by {@code /qedebug xpseed} to inspect what a
+     * given seed would offer, or to recover a run whose seed is believed to be off by a known amount.
+     */
+    public static void setXpSeedForDebug(int xpSeed) {
+        possibleXPSeeds.clear();
+        possibleXPSeeds.add(xpSeed);
+        Configs.enchCrackState = CrackState.CRACKED;
+    }
     private static int firstXpSeed;
     @Nullable
     public static BlockPos enchantingTablePos = null;
@@ -375,6 +386,8 @@ public class EnchantmentCracker {
             Configs.playerCrackState = PlayerRandCracker.CrackState.CRACKED;
             Configs.enchCrackState = CrackState.CRACKED;
             event.setMaintained();
+            QEDebug.log("xpSeed: enchant performed => new table seed %s (from player seed 0x%s, which is left untouched)",
+                    QEDebug.xpSeed(xpSeed), QEDebug.hex(prevSeed));
         } else if (Configs.playerCrackState == PlayerRandCracker.CrackState.HALF_CRACKED) {
             possibleXPSeeds.clear();
             Configs.playerCrackState = PlayerRandCracker.CrackState.ENCH_CRACKING_2;

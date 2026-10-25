@@ -86,6 +86,10 @@
 	"quick-enchant.config.generic.comment.enchantingPrediction": "Show the enchantment prediction overlay and the Add Info button on the enchanting table screen",
 	"quick-enchant.config.generic.name.playerRNGMaintenance": "Player RNG Maintenance",
 	"quick-enchant.config.generic.comment.playerRNGMaintenance": "Keep the cracked player RNG maintained instead of resetting it on known RNG calls",
+	"quick-enchant.config.generic.name.dummyItem": "Dummy Item",
+	"quick-enchant.config.generic.comment.dummyItem": "Item used for dummy enchantments (advances the seed; the enchanted copy is dropped). Books are a good choice",
+	"quick-enchant.config.generic.name.debug": "Debug",
+	"quick-enchant.config.generic.comment.debug": "Log full automation state (plans, RNG steps, table predictions) and write snapshot files on failure. Use this to reproduce and report problems",
 	"quick-enchant.config.generic.name.maxEnchantItemThrows": "Max Enchant Item Throws",
 	"quick-enchant.config.generic.comment.maxEnchantItemThrows": "Maximum number of items that may be thrown while searching for the desired enchantments",
 	"quick-enchant.config.generic.name.minEnchantBookshelves": "Min Enchant Bookshelves",
@@ -160,5 +164,17 @@
 	"quick-enchant.flow.previewValid": "Valid items: %s",
 	"quick-enchant.flow.infeasible": "The selected enchantments are most likely unobtainable",
 	"quick-enchant.config.generic.name.maxThrowsPerTick": "Max Throws Per Tick",
-	"quick-enchant.config.generic.comment.maxThrowsPerTick": "Maximum items thrown per tick while advancing the RNG (1-256, throwing multiple from one stack per tick is safe)"
+	"quick-enchant.config.generic.comment.maxThrowsPerTick": "Maximum items thrown per tick while advancing the RNG (1-256, throwing multiple from one stack per tick is safe)",
+
+	"quick-enchant.debug.disabled": "Debug mode is off. Run /qedebug on to enable it.",
+	"quick-enchant.debug.enabled": "Debug mode is now %s. Full automation state will be logged to the game log.",
+	"quick-enchant.debug.turnedOff": "Debug mode is now %s.",
+	"quick-enchant.debug.where": "Snapshot files go to <gameDir>/quick-enchant-debug/. Use /qedebug dump to write one now.",
+	"quick-enchant.debug.dumped": "Snapshot written to %s",
+	"quick-enchant.debug.dumpFailed": "Failed to write the snapshot file - see the game log for details.",
+	"quick-enchant.debug.noHistory": "No debug lines recorded yet.",
+	"quick-enchant.debug.noTable": "Open the enchanting table first.",
+	"quick-enchant.debug.noXpSeed": "The enchantment seed is not cracked yet.",
+	"quick-enchant.debug.slotEmpty": "The table's item slot is empty.",
+	"quick-enchant.debug.badNumber": "\"%s\" is not a valid number (decimal or 0x-prefixed hex)."
 }

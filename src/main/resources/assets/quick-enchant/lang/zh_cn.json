@@ -86,6 +86,10 @@
 	"quick-enchant.config.generic.comment.enchantingPrediction": "在附魔台界面显示附魔预测覆盖层和\"添加信息\"按钮",
 	"quick-enchant.config.generic.name.playerRNGMaintenance": "玩家随机数维护",
 	"quick-enchant.config.generic.comment.playerRNGMaintenance": "对已知的随机数调用保持镜像推进而不是重置破解状态",
+	"quick-enchant.config.generic.name.dummyItem": "假附魔物品",
+	"quick-enchant.config.generic.comment.dummyItem": "用于假附魔的物品（用于推进附魔种子，附魔后的副本会被丢弃）。书是好选择",
+	"quick-enchant.config.generic.name.debug": "调试模式",
+	"quick-enchant.config.generic.comment.debug": "输出完整的自动化状态（计划、随机数推进、附魔台预测），失败时写出快照文件。用于复现和反馈问题",
 	"quick-enchant.config.generic.name.maxEnchantItemThrows": "最大投掷物品数",
 	"quick-enchant.config.generic.comment.maxEnchantItemThrows": "搜索目标附魔时允许扔出的最大物品数",
 	"quick-enchant.config.generic.name.minEnchantBookshelves": "最小书架数",
@@ -162,5 +166,17 @@
 	"quick-enchant.flow.previewValid": "有效物品: %s",
 	"quick-enchant.flow.infeasible": "所选附魔大概率无法满足",
 	"quick-enchant.config.generic.name.maxThrowsPerTick": "每Tick最大扔出数",
-	"quick-enchant.config.generic.comment.maxThrowsPerTick": "推进随机数时每 tick 最多扔出的物品数（1-256，同一组连扔安全）"
+	"quick-enchant.config.generic.comment.maxThrowsPerTick": "推进随机数时每 tick 最多扔出的物品数（1-256，同一组连扔安全）",
+
+	"quick-enchant.debug.disabled": "调试模式未开启。使用 /qedebug on 开启。",
+	"quick-enchant.debug.enabled": "调试模式已%s，完整的自动化状态会输出到游戏日志。",
+	"quick-enchant.debug.turnedOff": "调试模式已%s。",
+	"quick-enchant.debug.where": "快照文件位于 <gameDir>/quick-enchant-debug/，可用 /qedebug dump 立即生成一份。",
+	"quick-enchant.debug.dumped": "快照已写入 %s",
+	"quick-enchant.debug.dumpFailed": "写入快照文件失败，详情见游戏日志。",
+	"quick-enchant.debug.noHistory": "暂无调试记录。",
+	"quick-enchant.debug.noTable": "请先打开附魔台界面。",
+	"quick-enchant.debug.noXpSeed": "附魔种子尚未破解。",
+	"quick-enchant.debug.slotEmpty": "附魔台物品栏为空。",
+	"quick-enchant.debug.badNumber": "“%s”不是有效数字（十进制或 0x 开头的十六进制）。"
 }

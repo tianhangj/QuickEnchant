@@ -26,6 +26,6 @@
 		"java": ">=25",
 		"fabric-api": "*",
 		"malilib": ">=0.28.8",
-		"quickshulker": ">=3.0.0"
+		"quickshulker": "*"
 	}
 }

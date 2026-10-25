@@ -4,6 +4,7 @@ import me.tianhangj.quickenchant.Configs;
 import me.tianhangj.quickenchant.util.CUtil;
 import me.tianhangj.quickenchant.util.CComponentUtil;
 import me.tianhangj.quickenchant.util.MultiVersionCompat;
+import me.tianhangj.quickenchant.util.QEDebug;
 import me.tianhangj.quickenchant.command.ClientCommandHelper;
 import me.tianhangj.quickenchant.event.ClientLevelEvents;
 import me.tianhangj.quickenchant.interfaces.ICreativeSlot;
@@ -138,10 +139,14 @@ public class PlayerRandCracker {
 
     public static void onDropItem() {
         if (canMaintainPlayerRNG(RNGCallType.DROP_ITEM)) {
+            long before = seed;
             for (int i = 0; i < 4; i++) {
                 nextInt();
             }
+            QEDebug.log("playerRNG: DROP_ITEM seed 0x%s -> 0x%s (4 steps)",
+                    QEDebug.hex(before), QEDebug.hex(seed));
         } else {
+            QEDebug.log("playerRNG: DROP_ITEM could not be maintained; player crack reset");
             resetCracker(RNGCallType.DROP_ITEM, false);
         }
     }
@@ -218,8 +223,12 @@ public class PlayerRandCracker {
 
     public static void onEnchantedItem() {
         if (canMaintainPlayerRNG(RNGCallType.ENCHANTING)) {
-            nextInt();
+            long before = seed;
+            int value = nextInt();
+            QEDebug.log("playerRNG: ENCHANTING nextInt=0x%s seed 0x%s -> 0x%s (this value becomes the table seed)",
+                    QEDebug.xpSeed(value), QEDebug.hex(before), QEDebug.hex(seed));
         } else {
+            QEDebug.log("playerRNG: ENCHANTING could not be maintained; player crack reset");
             resetCracker(RNGCallType.ENCHANTING, false);
         }
     }

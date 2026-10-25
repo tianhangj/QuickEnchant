@@ -6,6 +6,7 @@ import me.tianhangj.quickenchant.Configs;
 import me.tianhangj.quickenchant.features.EnchantmentCracker;
 import me.tianhangj.quickenchant.features.PlayerRandCracker;
 import me.tianhangj.quickenchant.predicate.EnchantPredicate;
+import me.tianhangj.quickenchant.util.QEDebug;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.Registries;
@@ -70,29 +71,56 @@ public class EnchantSolver {
         int maxThrows = Configs.getMaxEnchantItemThrows();
         int maxSlot = Configs.getMaxEnchantSlot();
 
+        QEDebug.log("solver: item=%s dummy=%s next=%s currentXpSeed=%s playerSeed=0x%s maxThrows=%d bookshelves=%d..%d maxSlot=%d levels=%d..%d",
+                QEDebug.stack(realStack), QEDebug.stack(dummyStack), nextItem == null ? "none" : nextItem.toString(),
+                QEDebug.xpSeed(currentXpSeed), QEDebug.hex(playerSeed), maxThrows,
+                minBookshelves, maxBookshelves, maxSlot,
+                Configs.getMinEnchantLevels(), Configs.getMaxEnchantLevels());
+
+        // rejection tallies, so a failed search can be explained in one line instead of per-step spam
+        int tried = 0;
+        int dummyEmpty = 0;
+        int realEmpty = 0;
+        int costOutOfRange = 0;
+        int predicateFailed = 0;
+
         for (int times = 0; times <= maxThrows; times++) {
-            int realXpSeed;
-            if (times == 0) {
-                realXpSeed = currentXpSeed;
-            } else {
-                Rand playerRand = new Rand(LCG.JAVA, playerSeed);
-                playerRand.advance(times * 4L);
-                realXpSeed = (int) playerRand.nextBits(32);
-            }
+            // The table seed AFTER the dummy enchant. Every successful enchant - dummy or real -
+            // runs Player.onEnchantmentPerformed, which does enchantmentSeed = random.nextInt().
+            // The dummy enchant therefore consumes exactly one nextInt() from the player RNG,
+            // right after the `times` pre-throws (4 nextInt-equivalents each). This holds for
+            // times == 0 as well: the seed becomes out(s + 1), NOT the current seed. Only the
+            // no-dummy path keeps the current seed, because then no enchant has happened yet.
+            Rand playerRand = new Rand(LCG.JAVA, playerSeed);
+            playerRand.advance(times * 4L);
+            int dummyXpSeed = (int) playerRand.nextBits(32);
 
             for (int bookshelves = minBookshelves; bookshelves <= maxBookshelves; bookshelves++) {
-                // no-dummy case: only possible without pre-throws (the table seed only changes on enchant)
+                // no-dummy case: the table seed does not depend on the pre-throws, so if this can
+                // work at all it already works at times == 0 - no need to search it repeatedly
                 if (times == 0) {
-                    Plan plan = tryCombination(registry, currentXpSeed, realXpSeed, NO_DUMMY, bookshelves,
-                            times, realStack, dummyStack, predicate, maxSlot);
+                    Rejection rejection = new Rejection();
+                    Plan plan = tryCombination(registry, currentXpSeed, currentXpSeed, NO_DUMMY, bookshelves,
+                            times, realStack, dummyStack, predicate, maxSlot, rejection);
+                    tried += rejection.tried;
+                    dummyEmpty += rejection.dummyEmpty;
+                    realEmpty += rejection.realEmpty;
+                    costOutOfRange += rejection.costOutOfRange;
+                    predicateFailed += rejection.predicateFailed;
                     if (plan != null) {
                         return withLookahead(plan, registry, playerSeed, nextItem, nextPredicate, minBookshelves, maxBookshelves, maxSlot);
                     }
                 }
 
                 for (int dummySlot = 0; dummySlot < 3; dummySlot++) {
-                    Plan plan = tryCombination(registry, currentXpSeed, realXpSeed, dummySlot, bookshelves,
-                            times, realStack, dummyStack, predicate, maxSlot);
+                    Rejection rejection = new Rejection();
+                    Plan plan = tryCombination(registry, currentXpSeed, dummyXpSeed, dummySlot, bookshelves,
+                            times, realStack, dummyStack, predicate, maxSlot, rejection);
+                    tried += rejection.tried;
+                    dummyEmpty += rejection.dummyEmpty;
+                    realEmpty += rejection.realEmpty;
+                    costOutOfRange += rejection.costOutOfRange;
+                    predicateFailed += rejection.predicateFailed;
                     if (plan != null) {
                         return withLookahead(plan, registry, playerSeed, nextItem, nextPredicate, minBookshelves, maxBookshelves, maxSlot);
                     }
@@ -100,13 +128,24 @@ public class EnchantSolver {
             }
         }
 
+        QEDebug.log("solver: no plan found. combinations=%d dummyListEmpty=%d realListEmpty=%d costOutOfRange=%d predicateFailed=%d",
+                tried, dummyEmpty, realEmpty, costOutOfRange, predicateFailed);
         return null;
+    }
+
+    /** Tallies why combinations were rejected, so a failed search reports one summary line. */
+    private static final class Rejection {
+        int tried;
+        int dummyEmpty;
+        int realEmpty;
+        int costOutOfRange;
+        int predicateFailed;
     }
 
     @Nullable
     private static Plan tryCombination(Registry<Enchantment> registry, int currentXpSeed, int realXpSeed, int dummySlot,
                                        int bookshelves, int times, ItemStack realStack, ItemStack dummyStack,
-                                       EnchantPredicate predicate, int maxSlot) {
+                                       EnchantPredicate predicate, int maxSlot, Rejection rejection) {
         List<EnchantmentInstance> dummyList = List.of();
         if (dummySlot != NO_DUMMY) {
             // the dummy offer is simulated with the dummy item's own stack (its enchantability
@@ -114,22 +153,27 @@ public class EnchantSolver {
             // advances the seed) if the list is non-empty
             dummyList = EnchantmentCracker.simulateSlotList(registry, currentXpSeed, dummySlot, bookshelves, dummyStack);
             if (dummyList.isEmpty()) {
+                rejection.dummyEmpty++;
                 return null;
             }
         }
 
         for (int realSlot = 0; realSlot < maxSlot; realSlot++) {
+            rejection.tried++;
             List<EnchantmentInstance> realList = EnchantmentCracker.simulateSlotList(registry, realXpSeed, realSlot, bookshelves, realStack);
             if (realList.isEmpty()) {
+                rejection.realEmpty++;
                 continue;
             }
             int realCost = EnchantmentCracker.simulateSlotCost(realXpSeed, realSlot, bookshelves, realStack);
             if (realCost < Configs.getMinEnchantLevels() || realCost > Configs.getMaxEnchantLevels()) {
+                rejection.costOutOfRange++;
                 continue;
             }
 
             // the real item receives only the real list (the dummy enchants a separate item)
             if (!predicate.test(realList)) {
+                rejection.predicateFailed++;
                 continue;
             }
 
@@ -173,11 +217,15 @@ public class EnchantSolver {
             playerRand.advance(baseSteps + 4L * m);
             int writtenSeed = (int) playerRand.nextBits(32);
             if (seedOffers(registry, writtenSeed, nextStack, nextPredicate, minBookshelves, maxBookshelves, maxSlot)) {
+                QEDebug.log("solver: lookahead windowThrows=%d writes next seed %s (baseSteps=%d)",
+                        m, QEDebug.xpSeed(writtenSeed), baseSteps);
                 return new Plan(plan.itemThrows(), plan.dummySlot(), plan.realSlot(), plan.bookshelves(),
                         plan.currentXpSeed(), plan.realXpSeed(), plan.realList(),
                         plan.placePrediction(), plan.swapPrediction(), m);
             }
         }
+        QEDebug.log("solver: lookahead found no usable window within %d throws (baseSteps=%d); next item solves independently",
+                MAX_WINDOW_THROWS, baseSteps);
         return plan;
     }
 
