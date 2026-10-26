@@ -347,14 +347,15 @@ public final class QEDebug {
         }
         StringBuilder sb = new StringBuilder();
         sb.append("itemThrows=").append(plan.itemThrows())
-                .append(" dummySlot=").append(plan.dummySlot())
+                .append(" dummySlot=").append(plan.usesDummy() ? plan.dummySlot() : "none")
                 .append(" realSlot=").append(plan.realSlot())
                 .append(" bookshelves=").append(plan.bookshelves())
-                .append(" windowThrows=").append(plan.windowThrows());
-        sb.append("\n  xpSeed(now)=").append(xpSeed(plan.currentXpSeed()))
-                .append(" xpSeed(after dummy)=").append(xpSeed(plan.realXpSeed()));
-        sb.append("\n  realList=").append(enchantments(plan.realList()));
-        sb.append("\n  placePrediction=").append(prediction(plan.placePrediction()));
+                .append(" windowThrows=").append(plan.windowThrows())
+                .append("\n  xpSeed=").append(xpSeed(plan.xpSeed()))
+                .append("\n  realList=").append(enchantments(plan.realList()));
+        if (plan.placePrediction() != null) {
+            sb.append("\n  placePrediction=").append(prediction(plan.placePrediction()));
+        }
         sb.append("\n  swapPrediction=").append(prediction(plan.swapPrediction()));
         return sb.toString();
     }

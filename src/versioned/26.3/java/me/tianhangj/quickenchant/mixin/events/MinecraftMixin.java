@@ -1,0 +1,42 @@
+package me.tianhangj.quickenchant.mixin.events;
+
+import me.tianhangj.quickenchant.event.ClientConnectionEvents;
+import me.tianhangj.quickenchant.event.ClientLevelEvents;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.ClientLevel;
+import org.jspecify.annotations.Nullable;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+/**
+ * Minecraft 主类注入（本文件是 26.3 形状）。
+ *
+ * <p>相对 26.1.2/26.2 的差异：{@code Minecraft.setScreen} 在 26.2 被删除，
+ * 屏幕状态搬到 {@code Gui}，因此“拦截打开屏幕”的注入搬到了
+ * {@link me.tianhangj.quickenchant.mixin.events.GuiMixin}。
+ * 本类只保留与版本无关的两个注入。
+ */
+@Mixin(Minecraft.class)
+public abstract class MinecraftMixin {
+    @Unique
+    private boolean isLevelLoaded = false;
+
+    @Inject(method = "updateLevelInEngines(Lnet/minecraft/client/multiplayer/ClientLevel;Z)V", at = @At("HEAD"))
+    public void onUpdateLevelInEngines(@Nullable ClientLevel level, boolean bl, CallbackInfo ci) {
+        if (isLevelLoaded) {
+            ClientLevelEvents.UNLOAD_LEVEL.invoker().onUnloadLevel(level == null);
+        }
+        isLevelLoaded = level != null;
+        if (isLevelLoaded) {
+            ClientLevelEvents.LOAD_LEVEL.invoker().onLoadLevel(level);
+        }
+    }
+
+    @Inject(method = "disconnect(Lnet/minecraft/client/gui/screens/Screen;Z)V", at = @At("RETURN"))
+    public void onDisconnect(CallbackInfo ci) {
+        ClientConnectionEvents.DISCONNECT.invoker().onDisconnect();
+    }
+}

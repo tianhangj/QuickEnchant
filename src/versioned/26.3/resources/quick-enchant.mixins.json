@@ -1,0 +1,52 @@
+{
+	"required": true,
+	"package": "me.tianhangj.quickenchant.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"mixins": [],
+	"client": [
+		"commands.enchant.EnchantmentScreenMixin",
+		"commands.enchant.MultiPlayerGameModeMixin",
+		"events.ClientPacketListenerMixin",
+		"events.GuiMixin",
+		"events.MinecraftMixin",
+		"rngevents.AnvilMenuMixin",
+		"rngevents.ClientLevelMixin",
+		"rngevents.ClientPacketListenerMixin",
+		"rngevents.ConsumableMixin",
+		"rngevents.CreeperMixin",
+		"rngevents.CrossbowItemMixin",
+		"rngevents.CustomCreativeSlotMixin",
+		"rngevents.EntityMixin",
+		"rngevents.FishingRodItemMixin",
+		"rngevents.FlintAndSteelItemMixin",
+		"rngevents.FoodOnAStickItemMixin",
+		"rngevents.InventoryMixin",
+		"rngevents.ItemStackMixin",
+		"rngevents.LivingEntityMixin",
+		"rngevents.LocalPlayerMixin",
+		"rngevents.MultiPlayerGameModeMixin",
+		"rngevents.MushroomCowSheepAndSnowGolemMixin",
+		"rngevents.PlayerMixin",
+		"rngevents.PumpkinBlockMixin",
+		"rngevents.ServerboundContainerClosePacketMixin",
+		"rngevents.ShearsItemMixin",
+		"rngevents.droppableinventory.AbstractCraftingMenuMixin",
+		"rngevents.droppableinventory.CartographyTableMenuMixin",
+		"rngevents.droppableinventory.EnchantmentMenuMixin",
+		"rngevents.droppableinventory.GrindstoneMenuMixin",
+		"rngevents.droppableinventory.ItemCombinerMenuMixin",
+		"rngevents.droppableinventory.LoomMenuMixin",
+		"rngevents.droppableinventory.MerchantMenuMixin",
+		"rngevents.droppableinventory.StonecutterMenuMixin",
+		"suggestionshook.ClientPacketListenerMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	},
+	"overwrites": {
+		"requireAnnotations": true
+	},
+	"mixinextras": {
+		"minVersion": "0.5.0"
+	}
+}

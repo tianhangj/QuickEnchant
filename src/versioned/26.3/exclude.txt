@@ -1,0 +1,11 @@
+# 26.3 需要从基础源码中排除的文件（每行一个，相对 src/main/java）
+#
+# HoeAndShovelItemMixin 注入 net.minecraft.world.item.HoeItem / ShovelItem 的 useOn。
+# 26.3 删除了这两个类，锄头/铲子的方块转换改为数据驱动
+# （DataComponents.BLOCK_TRANSFORMER + BlockTransformer.transformBlock），
+# 因此该 mixin 在 26.3 上无类可注入，会导致编译失败或运行期注入崩溃。
+#
+# 删除是安全的：它调用的 PlayerRandCracker.onItemDamage 在所有版本中都是空方法，
+# 而真正需要捕获的耐久消耗已由 ItemStackMixin 在 ItemStack.hurtAndBreak 处统一拦截
+# （26.3 的 BlockTransformer.transformBlock 同样经由 hurtAndBreak 扣耐久）。
+me/tianhangj/quickenchant/mixin/rngevents/HoeAndShovelItemMixin.java

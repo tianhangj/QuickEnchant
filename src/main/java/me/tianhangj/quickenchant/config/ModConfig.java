@@ -37,13 +37,14 @@ public class ModConfig implements IConfigHandler {
         public static final ConfigStringList THROW_WHITELIST = new ConfigStringList("throwWhitelist", ImmutableList.of(),
                 "Item IDs whose stacks in the inventory may be auto-thrown to advance the RNG. One ID per entry, e.g. minecraft:stick").apply(GENERIC_KEY);
         /**
-         * Item used for dummy enchantments. The dummy enchant advances the table seed to the target
-         * value; the dummy copy is then dropped (it gets random enchantments). Note the table can only
-         * enchant items with no existing enchantments, so the dummy must be a separate item from the
-         * real target.
+         * Item used for the dummy enchant of the FIRST entry of a run. That dummy enchant is what
+         * writes the table seed item 1 is enchanted with; from item 2 on the previous item's enchant
+         * already writes the next seed, so no dummy is used. The dummy copy is dropped afterwards
+         * (it carries random enchantments). Note the table only enchants items with no existing
+         * enchantments, so the dummy must be a separate item from the real targets.
          */
         public static final ConfigString DUMMY_ITEM = new ConfigString("dummyItem", "minecraft:book",
-                "Item used for dummy enchantments (advances the seed; the enchanted copy is dropped). Books are a good choice").apply(GENERIC_KEY);
+                "Item used for the dummy enchant of the first item (writes its seed; the enchanted copy is dropped). Books are a good choice").apply(GENERIC_KEY);
         /** Whether the lectern bookshelf-count adjuster may be used. When off, the bookshelf count is never modified. */
         public static final ConfigBoolean LECTERN_ADJUSTMENT = new ConfigBoolean("lecternAdjustment", true,
                 "Allow turning lectern pages to adjust the bookshelf count. When disabled the bookshelf count is never modified").apply(GENERIC_KEY);

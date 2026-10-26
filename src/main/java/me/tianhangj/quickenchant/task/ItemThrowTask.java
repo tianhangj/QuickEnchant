@@ -137,7 +137,7 @@ public abstract class ItemThrowTask extends SimpleTask {
     }
 
     private static void handleItemSpawn(ClientboundAddEntityPacket packet) {
-        if (packet.getType() != EntityType.ITEM) {
+        if (packet.getType() != me.tianhangj.quickenchant.util.Compat.itemEntityType()) {
             return;
         }
 

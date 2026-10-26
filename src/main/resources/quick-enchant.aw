@@ -1,6 +1,7 @@
 accessWidener v2 official
 
 # ClientCommandHelper.addOverlayMessage
+# 26.1.2: overlayMessageTime 在 Gui 上
 accessible field net/minecraft/client/gui/Gui overlayMessageTime I
 
 # RNG Events (ported from clientcommands)

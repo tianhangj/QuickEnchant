@@ -3,6 +3,7 @@ package me.tianhangj.quickenchant.features;
 import me.tianhangj.quickenchant.Configs;
 import me.tianhangj.quickenchant.util.CUtil;
 import me.tianhangj.quickenchant.util.CComponentUtil;
+import me.tianhangj.quickenchant.util.Compat;
 import me.tianhangj.quickenchant.util.MultiVersionCompat;
 import me.tianhangj.quickenchant.util.QEDebug;
 import me.tianhangj.quickenchant.command.ClientCommandHelper;
@@ -12,6 +13,7 @@ import net.fabricmc.fabric.api.event.Event;
 import net.fabricmc.fabric.api.event.EventFactory;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen;
 import net.minecraft.client.multiplayer.MultiPlayerGameMode;
@@ -135,6 +137,20 @@ public class PlayerRandCracker {
             ClientCommandHelper.sendError(Component.translatable("playerManip.reset", reason.resetMessage));
             Configs.playerCrackState = PlayerRandCracker.CrackState.UNCRACKED;
         }
+    }
+
+    /**
+     * Forgets the cracked player seed outright, silently and unconditionally.
+     *
+     * <p>Used when a run proves the seed model wrong: the player seed and the table seed are a
+     * matched pair, so discarding only one - or keeping both when they are simply wrong - would
+     * make the next run misposition the RNG in exactly the same way. Unlike
+     * {@link #resetCracker(RNGCallType)} this prints nothing and does not fire the RNG-call event
+     * (the caller reports the reason itself, and the event would trip the abort handling again).
+     */
+    public static void forgetSeed() {
+        Configs.playerCrackState = CrackState.UNCRACKED;
+        seed = 0L;
     }
 
     public static void onDropItem() {
@@ -296,7 +312,8 @@ public class PlayerRandCracker {
         MultiPlayerGameMode interactionManager = mc.gameMode;
         assert player != null && interactionManager != null;
 
-        boolean isInContainer = mc.screen instanceof AbstractContainerScreen && !(mc.screen instanceof CreativeModeInventoryScreen);
+        Screen currentScreen = Compat.getScreen(mc);
+        boolean isInContainer = currentScreen instanceof AbstractContainerScreen && !(currentScreen instanceof CreativeModeInventoryScreen);
         boolean useCreativeThrow = player.hasInfiniteMaterials() && !isInContainer;
         if (useCreativeThrow) {
             // the client throttle is set a bit below the server throttle so we shouldn't get a desync here
@@ -305,7 +322,7 @@ public class PlayerRandCracker {
             }
 
             ItemStack stackToDrop = new ItemStack(Items.COBBLESTONE);
-            player.drop(stackToDrop, true);
+            Compat.dropItem(player, stackToDrop, true);
             interactionManager.handleCreativeModeItemDrop(stackToDrop);
             return new ThrowItemsResult(ThrowItemsResult.Type.SUCCESS);
         }

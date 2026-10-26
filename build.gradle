@@ -3,20 +3,14 @@ plugins {
 	id 'maven-publish'
 }
 
-// ===== dev build numbering: every `gradlew build` produces base-dev.N and increments N =====
-def devNumberFile = file('dev-build-number.txt')
-if (!devNumberFile.exists()) {
-	devNumberFile.text = '1'
-}
-def devNumber = devNumberFile.text.trim().toInteger()
-version = "${project.version}-dev.${devNumber}"
+// ===== 版本号：基底取 gradle.properties 的 version，产物名再附加 MC 版本 =====
+def baseVersion = project.version
 
-tasks.named('build') {
-	doLast {
-		devNumberFile.text = String.valueOf(devNumber + 1)
-		println "quick-enchant built as ${version} (next dev number: ${devNumber + 1})"
-	}
-}
+// ===== 多版本支持（必须在 dependencies 之前应用，它会改写 minecraft_version 等属性） =====
+apply from: 'gradle/multi-version.gradle'
+
+// 产物名带 MC 版本，避免三个版本的 jar 互相覆盖/混淆，例如 1.3.0+mc26.2
+version = "${baseVersion}+mc${project.minecraft_version}"
 
 repositories {
 	maven {
@@ -58,7 +52,9 @@ repositories {
 }
 
 loom {
-	accessWidenerPath = file('src/main/resources/quick-enchant.aw')
+	// accessWidener 也随版本变化：26.2 起 overlayMessageTime 从 Gui 搬到 Hud。
+	// multi-version.gradle 会提供 qeAccessWidenerFile（优先取版本化目录里的同名文件）。
+	accessWidenerPath = project.ext.qeAccessWidenerFile
 }
 
 dependencies {
@@ -90,9 +86,14 @@ test {
 processResources {
 	def version = project.version
 	inputs.property "version", version
+	// 多版本：fabric.mod.json 里的依赖约束也必须随目标版本变化
+	inputs.property "minecraft_version", project.minecraft_version
+	inputs.property "malilib_min_version", project.malilib_min_version
 
 	filesMatching("fabric.mod.json") {
-		expand "version": version
+		expand "version": version,
+				"minecraft_version": project.minecraft_version,
+				"malilib_min_version": project.malilib_min_version
 	}
 }
 

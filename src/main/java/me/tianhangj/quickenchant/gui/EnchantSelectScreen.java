@@ -1,10 +1,9 @@
 package me.tianhangj.quickenchant.gui;
 
-import com.seedfinding.mcseed.lcg.LCG;
-import com.seedfinding.mcseed.rand.Rand;
 import me.tianhangj.quickenchant.Configs;
 import me.tianhangj.quickenchant.automation.EnchantAutomation;
 import me.tianhangj.quickenchant.automation.PrepareFlow;
+import me.tianhangj.quickenchant.automation.SeedChain;
 import me.tianhangj.quickenchant.features.EnchantmentCracker;
 import me.tianhangj.quickenchant.command.ClientCommandHelper;
 import me.tianhangj.quickenchant.config.FlowState;
@@ -306,29 +305,30 @@ public class EnchantSelectScreen extends Screen {
         }
 
         long startSeed = new java.util.Random().nextLong();
-        Rand rand = new Rand(LCG.JAVA, startSeed);
-        for (int n = 0; n <= MAX_FEASIBILITY_THROWS; n++) {
-            // n throws advance the RNG by 4n steps, then the dummy enchant consumes one nextInt
-            // which becomes the table seed for the real enchant
-            rand.advance(n == 0 ? 1 : 4);
-            int xpSeed = (int) rand.nextBits(32);
-            for (int b = bMin; b <= bMax; b++) {
+        // The seed the dummy enchant writes after n throws is derived from startSeed every time;
+        // stepping a shared Rand here would drift by one draw per candidate (the probe itself moves
+        // the Rand), making the preview disagree with the solver and with the game.
+        final int shelvesMin = bMin;
+        final int shelvesMax = bMax;
+        int found = SeedChain.findThrows(startSeed, 0L, MAX_FEASIBILITY_THROWS, candidate -> {
+            for (int b = shelvesMin; b <= shelvesMax; b++) {
                 for (int slot = 0; slot < 3; slot++) {
-                    var list = EnchantmentCracker.simulateSlotList(registry, xpSeed, slot, b, stack);
+                    var list = EnchantmentCracker.simulateSlotList(registry, candidate, slot, b, stack);
                     if (list.isEmpty()) {
                         continue;
                     }
-                    int cost = EnchantmentCracker.simulateSlotCost(xpSeed, slot, b, stack);
+                    int cost = EnchantmentCracker.simulateSlotCost(candidate, slot, b, stack);
                     if (cost < Configs.getMinEnchantLevels() || cost > Configs.getMaxEnchantLevels()) {
                         continue;
                     }
                     if (predicate.test(list)) {
-                        return false; // feasible
+                        return true; // feasible
                     }
                 }
             }
-        }
-        return true;
+            return false;
+        });
+        return found < 0;
     }
 
     private Component typeLabel() {
@@ -372,7 +372,7 @@ public class EnchantSelectScreen extends Screen {
     @Override
     public void onClose() {
         if (this.minecraft != null) {
-            this.minecraft.setScreen(parent);
+            me.tianhangj.quickenchant.util.Compat.setScreen(this.minecraft, parent);
         }
     }
 

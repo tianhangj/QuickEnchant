@@ -22,10 +22,10 @@
 	],
 	"depends": {
 		"fabricloader": ">=0.19.5",
-		"minecraft": "~26.1.2",
+		"minecraft": "${minecraft_version}",
 		"java": ">=25",
 		"fabric-api": "*",
-		"malilib": ">=0.28.8",
+		"malilib": ">=${malilib_min_version}",
 		"quickshulker": "*"
 	}
 }

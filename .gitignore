@@ -53,8 +53,5 @@ mods/
 *.log
 game-logs/
 
-# dev build counter (incremented automatically on every build)
-dev-build-number.txt
-
 # assistant local config
 .zcodeignore

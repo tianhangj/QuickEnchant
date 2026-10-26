@@ -1,7 +1,5 @@
 package me.tianhangj.quickenchant.automation;
 
-import com.seedfinding.mcseed.lcg.LCG;
-import com.seedfinding.mcseed.rand.Rand;
 import me.tianhangj.quickenchant.Configs;
 import me.tianhangj.quickenchant.features.EnchantmentCracker;
 import me.tianhangj.quickenchant.features.PlayerRandCracker;
@@ -19,47 +17,101 @@ import org.jspecify.annotations.Nullable;
 import java.util.List;
 
 /**
- * Searches for a sequence of table operations that produces the requested enchantments on one item.
+ * Plans the table operations for one queue entry.
  *
- * <p>The vanilla table only enchants items with no existing enchantments (server-enforced via
- * {@code ItemStack.isEnchantable()} and the zeroed slot costs in {@code EnchantmentMenu}), so when
- * the current seed does not already offer the target, a DUMMY enchant is performed on a separate
- * item (configurable, e.g. a book): the dummy enchant advances the table seed to the target value,
- * then the dummy is swapped out for the real item. The dummy copy keeps whatever the dummy enchant
- * applied and is dropped afterwards; it only needs a non-empty offer so the server actually
- * performs the enchant and advances the seed.
+ * <h2>The seed chain</h2>
+ * Every successful enchant runs {@code Player.onEnchantmentPerformed}, which does
+ * {@code enchantmentSeed = random.nextInt()}. The value it draws becomes the table seed for the
+ * NEXT enchant, while the seed used BY that enchant was written by the previous one. The
+ * enchantments therefore form a chain:
  *
- * <h2>Single-step lookahead</h2>
- * The real enchant writes the player RNG's next {@code nextInt()} into the table seed, which
- * becomes the NEXT item's seed. Throws executed between the dummy and the real enchant (the
- * "window") do not affect the real enchant itself (it reads the DataSlot written by the dummy),
- * so the solver additionally searches a window throw count m that positions that written value to
- * satisfy the next queue entry's predicate. The next item then enchants directly (its own solver's
- * no-dummy fast path hits automatically - no cross-item state is needed). If no m is found within
- * the cap, {@code windowThrows} is 0 and the next item solves independently.
+ * <pre>
+ *   throws -&gt; dummy enchant    writes S1  -&gt; item 1 enchants with S1
+ *   throws -&gt; item 1 enchant   writes S2  -&gt; item 2 enchants with S2
+ *   throws -&gt; item 2 enchant   writes S3  -&gt; item 3 enchants with S3
+ *   throws -&gt; item 3 enchant   writes S4  -&gt; ...
+ * </pre>
+ *
+ * Throwing items only advances the <em>player</em> RNG; it never touches the table seed. The seed an
+ * enchant writes is fully determined by the player RNG position at the moment of the enchant, which
+ * the automation controls by throwing whitelist items beforehand. So every step is: throw until the
+ * upcoming enchant will write the seed the NEXT item needs, then enchant.
+ *
+ * <h2>Why only the first item needs a dummy</h2>
+ * The dummy's only job is to write the seed item 1 will use. From item 1 onwards the previous
+ * enchant already does that job, so a dummy would be a wasted table operation. Hence
+ * {@code dummySlot} is non-null only for the first entry of a run; every later entry is a pure
+ * chain step with no dummy.
+ *
+ * <p>There is no repair path. If a later entry's seed offers nothing for it, the chain is broken
+ * and no throw count can fix that - throwing does not change the seed already in the table.
+ * {@link #solve} then returns null and the caller terminates the run.
  */
 public class EnchantSolver {
     public static final int NO_DUMMY = -1;
 
-    /** upper bound for the lookahead window throws (each hit saves the next item its dummy) */
-    private static final int MAX_WINDOW_THROWS = 256;
-
+    /**
+     * @param itemThrows   item throws executed BEFORE opening the table
+     * @param dummySlot    {@link #NO_DUMMY} for every entry after the first; otherwise the table slot
+     *                     to enchant the dummy in, whose enchant writes this item's seed
+     * @param realSlot     table slot to click for this item
+     * @param xpSeed       the seed this item is enchanted with (written by the dummy, or already in the table)
+     * @param windowThrows item throws executed inside the open table, after the dummy drop (dummy only)
+     */
     public record Plan(int itemThrows, int dummySlot, int realSlot, int bookshelves,
-                       int currentXpSeed, int realXpSeed,
-                       List<EnchantmentInstance> realList,
-                       /** prediction for whatever sits in the table right after placement (dummy or real item) */
-                       EnchantmentCracker.TablePrediction placePrediction,
-                       /** prediction for the real item after it replaces the dummy */
+                       int xpSeed, List<EnchantmentInstance> realList,
+                       /** what the open table must show with the dummy in slot 0 (dummy only) */
+                       EnchantmentCracker.@Nullable TablePrediction placePrediction,
+                       /** what the open table must show with the real item in slot 0 */
                        EnchantmentCracker.TablePrediction swapPrediction,
-                       /** throws executed in the dummy->real window to prime the next queue entry's seed */
                        int windowThrows) {
+        public boolean usesDummy() {
+            return dummySlot != NO_DUMMY;
+        }
     }
 
+    /** A concrete way to enchant a stack: which bookshelf count, which slot, and what it grants. */
+    private record Offer(int bookshelves, int slot, List<EnchantmentInstance> list) {
+    }
+
+    /**
+     * How many pre-throws either path may scan: always the user's full configured budget.
+     *
+     * <p>It once had a 512-step "latency" cap, which silently turned "this seed needs a rare
+     * combination" into "no plan found" for an item that was enchantable well inside the configured
+     * limit. A throw count is cheap; giving up on a solvable item is not. The search stops at the
+     * first hit, so the full range is only walked when no solution exists at all.
+     */
+    public static int scanLimit(int maxThrows) {
+        return maxThrows;
+    }
+
+    /**
+     * Upper bound for the WINDOW throws - the ones made inside the already-open table, in the gap
+     * between the dummy drop and this item's own enchant.
+     *
+     * <p>They are deliberately not given the user's throw budget: they happen while the enchanter
+     * sits in an open GUI, and every throw is a container click plus a server confirmation, so a
+     * long search there turns a one-second step into a minute of standing still. Pre-table throws
+     * (before the table opens) have no such cost and use the full budget - the two are different
+     * things and must not be unified.
+     */
+    public static final int PRIME_WINDOW_THROWS = 256;
+
+    /**
+     * Plan this entry, or null when the chain cannot be continued (the caller terminates the run).
+     *
+     * @param firstOfRun true only for the first enchanted entry of a run - the only entry allowed to
+     *                   use a dummy, because no previous enchant exists yet to write its seed
+     * @param nextItem   the next queue entry, or null when this is the last one
+     */
     @Nullable
-    public static Plan solve(LocalPlayer player, Item item, EnchantPredicate predicate, int minBookshelves, int maxBookshelves,
-                             Item dummyItem, @Nullable Item nextItem, @Nullable EnchantPredicate nextPredicate) {
+    public static Plan solve(LocalPlayer player, Item item, EnchantPredicate predicate,
+                             int minBookshelves, int maxBookshelves, Item dummyItem, boolean firstOfRun,
+                             @Nullable Item nextItem, @Nullable EnchantPredicate nextPredicate) {
         if (Configs.enchCrackState != EnchantmentCracker.CrackState.CRACKED
-                || !Configs.playerCrackState.knowsSeed()) {
+                || !Configs.playerCrackState.knowsSeed()
+                || !EnchantmentCracker.knowsXpSeed()) {
             return null;
         }
 
@@ -70,183 +122,154 @@ public class EnchantSolver {
         ItemStack dummyStack = new ItemStack(dummyItem);
         int maxThrows = Configs.getMaxEnchantItemThrows();
         int maxSlot = Configs.getMaxEnchantSlot();
+        ItemStack nextStack = nextItem == null || nextPredicate == null ? null : new ItemStack(nextItem);
 
-        QEDebug.log("solver: item=%s dummy=%s next=%s currentXpSeed=%s playerSeed=0x%s maxThrows=%d bookshelves=%d..%d maxSlot=%d levels=%d..%d",
-                QEDebug.stack(realStack), QEDebug.stack(dummyStack), nextItem == null ? "none" : nextItem.toString(),
+        QEDebug.log("solver: item=%s next=%s firstOfRun=%s xpSeed=%s playerSeed=0x%s maxThrows=%d "
+                        + "bookshelves=%d..%d maxSlot=%d levels=%d..%d",
+                QEDebug.stack(realStack), nextItem == null ? "none" : nextItem.toString(), firstOfRun,
                 QEDebug.xpSeed(currentXpSeed), QEDebug.hex(playerSeed), maxThrows,
                 minBookshelves, maxBookshelves, maxSlot,
                 Configs.getMinEnchantLevels(), Configs.getMaxEnchantLevels());
 
-        // rejection tallies, so a failed search can be explained in one line instead of per-step spam
-        int tried = 0;
-        int dummyEmpty = 0;
-        int realEmpty = 0;
-        int costOutOfRange = 0;
-        int predicateFailed = 0;
-
-        for (int times = 0; times <= maxThrows; times++) {
-            // The table seed AFTER the dummy enchant. Every successful enchant - dummy or real -
-            // runs Player.onEnchantmentPerformed, which does enchantmentSeed = random.nextInt().
-            // The dummy enchant therefore consumes exactly one nextInt() from the player RNG,
-            // right after the `times` pre-throws (4 nextInt-equivalents each). This holds for
-            // times == 0 as well: the seed becomes out(s + 1), NOT the current seed. Only the
-            // no-dummy path keeps the current seed, because then no enchant has happened yet.
-            Rand playerRand = new Rand(LCG.JAVA, playerSeed);
-            playerRand.advance(times * 4L);
-            int dummyXpSeed = (int) playerRand.nextBits(32);
-
-            for (int bookshelves = minBookshelves; bookshelves <= maxBookshelves; bookshelves++) {
-                // no-dummy case: the table seed does not depend on the pre-throws, so if this can
-                // work at all it already works at times == 0 - no need to search it repeatedly
-                if (times == 0) {
-                    Rejection rejection = new Rejection();
-                    Plan plan = tryCombination(registry, currentXpSeed, currentXpSeed, NO_DUMMY, bookshelves,
-                            times, realStack, dummyStack, predicate, maxSlot, rejection);
-                    tried += rejection.tried;
-                    dummyEmpty += rejection.dummyEmpty;
-                    realEmpty += rejection.realEmpty;
-                    costOutOfRange += rejection.costOutOfRange;
-                    predicateFailed += rejection.predicateFailed;
-                    if (plan != null) {
-                        return withLookahead(plan, registry, playerSeed, nextItem, nextPredicate, minBookshelves, maxBookshelves, maxSlot);
-                    }
-                }
-
-                for (int dummySlot = 0; dummySlot < 3; dummySlot++) {
-                    Rejection rejection = new Rejection();
-                    Plan plan = tryCombination(registry, currentXpSeed, dummyXpSeed, dummySlot, bookshelves,
-                            times, realStack, dummyStack, predicate, maxSlot, rejection);
-                    tried += rejection.tried;
-                    dummyEmpty += rejection.dummyEmpty;
-                    realEmpty += rejection.realEmpty;
-                    costOutOfRange += rejection.costOutOfRange;
-                    predicateFailed += rejection.predicateFailed;
-                    if (plan != null) {
-                        return withLookahead(plan, registry, playerSeed, nextItem, nextPredicate, minBookshelves, maxBookshelves, maxSlot);
-                    }
+        // ===== chain step: the seed already in the table offers this item =====
+        // This is the steady state. It also covers the first entry when the table happens to hold a
+        // usable seed already, in which case the dummy would be a pure waste.
+        Offer offer = findOffer(registry, currentXpSeed, realStack, predicate, minBookshelves, maxBookshelves, maxSlot);
+        if (offer != null) {
+            // Throws happen before the table opens, so this enchant writes out(playerSeed + 4 * itemThrows).
+            int itemThrows = 0;
+            if (nextStack != null) {
+                itemThrows = findThrows(registry, playerSeed, SeedChain.chainSteps(0), nextStack, nextPredicate,
+                        minBookshelves, maxBookshelves, maxSlot, scanLimit(maxThrows));
+                if (itemThrows < 0) {
+                    QEDebug.log("solver: seed %s enchants this item, but none of the next %d throw counts makes "
+                                    + "its enchant write a seed the next entry can use",
+                            QEDebug.xpSeed(currentXpSeed), scanLimit(maxThrows));
+                    return null;
                 }
             }
+            QEDebug.log("solver: chain plan - seed %s offers slot %d at %d bookshelves; %d pre-throws make this "
+                            + "enchant write the next entry's seed",
+                    QEDebug.xpSeed(currentXpSeed), offer.slot(), offer.bookshelves(), itemThrows);
+            return new Plan(itemThrows, NO_DUMMY, offer.slot(), offer.bookshelves(), currentXpSeed, offer.list(),
+                    null,
+                    EnchantmentCracker.predictTable(registry, currentXpSeed, realStack, offer.bookshelves()),
+                    0);
         }
 
-        QEDebug.log("solver: no plan found. combinations=%d dummyListEmpty=%d realListEmpty=%d costOutOfRange=%d predicateFailed=%d",
-                tried, dummyEmpty, realEmpty, costOutOfRange, predicateFailed);
-        return null;
-    }
+        if (SeedChain.decide(false, firstOfRun) == SeedChain.Kind.BROKEN) {
+            // Later entries have no dummy to fall back on: the previous enchant was supposed to write
+            // a usable seed and did not, so the chain is broken and throwing cannot repair it.
+            QEDebug.log("solver: seed %s offers nothing for %s at bookshelves %d..%d, and this is not the "
+                            + "first entry - the chain is broken",
+                    QEDebug.xpSeed(currentXpSeed), QEDebug.stack(realStack), minBookshelves, maxBookshelves);
+            return null;
+        }
 
-    /** Tallies why combinations were rejected, so a failed search reports one summary line. */
-    private static final class Rejection {
-        int tried;
-        int dummyEmpty;
-        int realEmpty;
-        int costOutOfRange;
-        int predicateFailed;
-    }
+        // ===== dummy step: only ever for the first entry =====
+        // The dummy enchant happens after n0 throws, so it writes out(playerSeed + 4 * n0) - and that
+        // becomes the seed THIS item is enchanted with. The enchant itself consumes 1 step, the drop
+        // 4 more, so this item's own enchant lands at playerSeed + 4 * n0 + 5 + 4 * w and writes
+        // out(...) for the next entry. See SeedChain for the same accounting in testable form.
+        int limit = scanLimit(maxThrows);
+        int withRealOffer = 0;
+        int primed = 0;
 
-    @Nullable
-    private static Plan tryCombination(Registry<Enchantment> registry, int currentXpSeed, int realXpSeed, int dummySlot,
-                                       int bookshelves, int times, ItemStack realStack, ItemStack dummyStack,
-                                       EnchantPredicate predicate, int maxSlot, Rejection rejection) {
-        List<EnchantmentInstance> dummyList = List.of();
-        if (dummySlot != NO_DUMMY) {
-            // the dummy offer is simulated with the dummy item's own stack (its enchantability
-            // affects the cost and the candidate pool); the server only performs the enchant (and
-            // advances the seed) if the list is non-empty
-            dummyList = EnchantmentCracker.simulateSlotList(registry, currentXpSeed, dummySlot, bookshelves, dummyStack);
-            if (dummyList.isEmpty()) {
-                rejection.dummyEmpty++;
-                return null;
+        for (int n0 = 0; n0 <= limit; n0++) {
+            int dummyXpSeed = SeedChain.dummySeed(playerSeed, n0);
+            Offer realOffer = findOffer(registry, dummyXpSeed, realStack, predicate,
+                    minBookshelves, maxBookshelves, maxSlot);
+            if (realOffer == null) {
+                continue; // the dummy would not write a usable seed for this item
+            }
+            withRealOffer++;
+
+            // The window that primes the NEXT entry depends only on n0 (dummy enchant + drop), not
+            // on which slot the dummy is enchanted in - so it is searched once per n0. Without a
+            // usable window this n0 is pointless in a multi-entry run: the next entry could never
+            // be enchanted, and it has no dummy to fall back on.
+            int windowThrows = 0;
+            if (nextStack != null) {
+                windowThrows = findThrows(registry, playerSeed,
+                        SeedChain.chainSteps(n0) + SeedChain.DUMMY_TO_REAL_STEPS,
+                        nextStack, nextPredicate, minBookshelves, maxBookshelves, maxSlot,
+                        PRIME_WINDOW_THROWS);
+                if (windowThrows < 0) {
+                    continue;
+                }
+            }
+            primed++;
+
+            for (int dummySlot = 0; dummySlot < 3; dummySlot++) {
+                // The dummy shares the table session, so it must also produce an offer at the SAME
+                // bookshelf count - otherwise the server performs no enchant and the seed this plan
+                // depends on is never written.
+                List<EnchantmentInstance> dummyList = EnchantmentCracker.simulateSlotList(
+                        registry, currentXpSeed, dummySlot, realOffer.bookshelves(), dummyStack);
+                if (dummyList.isEmpty()) {
+                    continue;
+                }
+
+                QEDebug.log("solver: dummy plan - %d pre-throws, dummy slot %d at %d bookshelves writes seed %s; "
+                                + "%d window throws make this item's enchant write the next entry's seed",
+                        n0, dummySlot, realOffer.bookshelves(), QEDebug.xpSeed(dummyXpSeed), windowThrows);
+                return new Plan(n0, dummySlot, realOffer.slot(), realOffer.bookshelves(), dummyXpSeed,
+                        realOffer.list(),
+                        EnchantmentCracker.predictTable(registry, currentXpSeed, dummyStack, realOffer.bookshelves()),
+                        EnchantmentCracker.predictTable(registry, dummyXpSeed, realStack, realOffer.bookshelves()),
+                        windowThrows);
             }
         }
 
-        for (int realSlot = 0; realSlot < maxSlot; realSlot++) {
-            rejection.tried++;
-            List<EnchantmentInstance> realList = EnchantmentCracker.simulateSlotList(registry, realXpSeed, realSlot, bookshelves, realStack);
-            if (realList.isEmpty()) {
-                rejection.realEmpty++;
-                continue;
-            }
-            int realCost = EnchantmentCracker.simulateSlotCost(realXpSeed, realSlot, bookshelves, realStack);
-            if (realCost < Configs.getMinEnchantLevels() || realCost > Configs.getMaxEnchantLevels()) {
-                rejection.costOutOfRange++;
-                continue;
-            }
-
-            // the real item receives only the real list (the dummy enchants a separate item)
-            if (!predicate.test(realList)) {
-                rejection.predicateFailed++;
-                continue;
-            }
-
-            EnchantmentCracker.TablePrediction placePrediction;
-            EnchantmentCracker.TablePrediction swapPrediction;
-            if (dummySlot == NO_DUMMY) {
-                placePrediction = EnchantmentCracker.predictTable(registry, currentXpSeed, realStack, bookshelves);
-                swapPrediction = placePrediction;
-            } else {
-                placePrediction = EnchantmentCracker.predictTable(registry, currentXpSeed, dummyStack, bookshelves);
-                swapPrediction = EnchantmentCracker.predictTable(registry, realXpSeed, realStack, bookshelves);
-            }
-
-            return new Plan(times, dummySlot, realSlot, bookshelves, currentXpSeed, realXpSeed,
-                    realList, placePrediction, swapPrediction, 0);
-        }
+        QEDebug.log("solver: no dummy plan within %d throws (chain seed %s, bookshelves %d..%d): "
+                        + "%d of those seeds offered the item, %d of those could also prime the next entry "
+                        + "within %d window throws, and none of them had a usable dummy slot",
+                limit, QEDebug.xpSeed(currentXpSeed), minBookshelves, maxBookshelves,
+                withRealOffer, primed, PRIME_WINDOW_THROWS);
         return null;
     }
 
     /**
-     * Search the window throw count m so that the seed written by this item's real enchant
-     * satisfies the next queue entry's predicate.
+     * Smallest item-throw count that makes an enchant at {@code playerSeed + offsetSteps + 4n}
+     * write a seed the next queue entry can use, or -1 when none works up to {@code maxThrows}.
      *
-     * <p>RNG accounting, relative to the state s before this item's pre-throws: the dummy
-     * consumes out(s + 4n), the dummy drop advances 4 steps, m window throws advance 4m, and the
-     * real enchant consumes out(s + 4n + 5 + 4m) which becomes the next table seed. Without a
-     * dummy there is no pre-throw and no drop, so the written value is out(s + 4m).
+     * <p>Each throw is 4 player-RNG steps, and the enchant writes the next 32-bit draw as the next
+     * table seed, so candidate seeds are simply those draws.
      */
-    private static Plan withLookahead(Plan plan, Registry<Enchantment> registry, long playerSeed,
-                                      @Nullable Item nextItem, @Nullable EnchantPredicate nextPredicate,
-                                      int minBookshelves, int maxBookshelves, int maxSlot) {
-        if (nextItem == null || nextPredicate == null) {
-            return plan;
-        }
-
-        ItemStack nextStack = new ItemStack(nextItem);
-        int baseSteps = plan.dummySlot() == NO_DUMMY ? 0 : 4 * plan.itemThrows() + 5;
-
-        for (int m = 0; m <= MAX_WINDOW_THROWS; m++) {
-            Rand playerRand = new Rand(LCG.JAVA, playerSeed);
-            playerRand.advance(baseSteps + 4L * m);
-            int writtenSeed = (int) playerRand.nextBits(32);
-            if (seedOffers(registry, writtenSeed, nextStack, nextPredicate, minBookshelves, maxBookshelves, maxSlot)) {
-                QEDebug.log("solver: lookahead windowThrows=%d writes next seed %s (baseSteps=%d)",
-                        m, QEDebug.xpSeed(writtenSeed), baseSteps);
-                return new Plan(plan.itemThrows(), plan.dummySlot(), plan.realSlot(), plan.bookshelves(),
-                        plan.currentXpSeed(), plan.realXpSeed(), plan.realList(),
-                        plan.placePrediction(), plan.swapPrediction(), m);
-            }
-        }
-        QEDebug.log("solver: lookahead found no usable window within %d throws (baseSteps=%d); next item solves independently",
-                MAX_WINDOW_THROWS, baseSteps);
-        return plan;
+    private static int findThrows(Registry<Enchantment> registry, long playerSeed, long offsetSteps,
+                                  ItemStack nextStack, EnchantPredicate nextPredicate,
+                                  int minBookshelves, int maxBookshelves, int maxSlot, int maxThrows) {
+        return SeedChain.findThrows(playerSeed, offsetSteps, maxThrows, writtenSeed ->
+                findOffer(registry, writtenSeed, nextStack, nextPredicate,
+                        minBookshelves, maxBookshelves, maxSlot) != null);
     }
 
-    /** Whether the given table seed offers an enchantment set satisfying the predicate at some slot and bookshelf count. */
-    private static boolean seedOffers(Registry<Enchantment> registry, int seed, ItemStack stack, EnchantPredicate predicate,
-                                      int minBookshelves, int maxBookshelves, int maxSlot) {
+    /**
+     * Find a bookshelf count and slot whose offers satisfy the predicate for this seed, or null.
+     * Bookshelf counts and slots are scanned in ascending order so the plan is deterministic.
+     */
+    @Nullable
+    private static Offer findOffer(Registry<Enchantment> registry, int seed, ItemStack stack, EnchantPredicate predicate,
+                                   int minBookshelves, int maxBookshelves, int maxSlot) {
+        int minLevel = Configs.getMinEnchantLevels();
+        int maxLevel = Configs.getMaxEnchantLevels();
         for (int bookshelves = minBookshelves; bookshelves <= maxBookshelves; bookshelves++) {
             for (int slot = 0; slot < maxSlot; slot++) {
+                // the cost gate is much cheaper than drawing the enchantment list, and cost == 0
+                // means the server would offer nothing at all
+                int cost = EnchantmentCracker.simulateSlotCost(seed, slot, bookshelves, stack);
+                if (cost <= 0 || cost < minLevel || cost > maxLevel) {
+                    continue;
+                }
                 List<EnchantmentInstance> list = EnchantmentCracker.simulateSlotList(registry, seed, slot, bookshelves, stack);
                 if (list.isEmpty()) {
                     continue;
                 }
-                int cost = EnchantmentCracker.simulateSlotCost(seed, slot, bookshelves, stack);
-                if (cost < Configs.getMinEnchantLevels() || cost > Configs.getMaxEnchantLevels()) {
-                    continue;
-                }
                 if (predicate.test(list)) {
-                    return true;
+                    return new Offer(bookshelves, slot, list);
                 }
             }
         }
-        return false;
+        return null;
     }
 }

@@ -48,7 +48,7 @@ public class QECommands {
         // defer: /qeprepare runs inside the chat screen's key handling - setting the screen
         // synchronously would be replaced when the chat finishes processing the submit
         mc.execute(() -> {
-            mc.setScreen(new BoxSelectScreen(inherited));
+            me.tianhangj.quickenchant.util.Compat.setScreen(mc, new BoxSelectScreen(inherited));
             QuickEnchant.LOGGER.info("prepare: BoxSelectScreen opened (inherited={}, marked={})",
                     inherited, me.tianhangj.quickenchant.config.FlowState.selectedBoxes.size());
         });

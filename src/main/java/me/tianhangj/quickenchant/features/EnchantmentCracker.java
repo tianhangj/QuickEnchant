@@ -216,6 +216,11 @@ public class EnchantmentCracker {
         return possibleXPSeeds.iterator().next();
     }
 
+    /** Whether {@link #getCurrentXpSeed()} can be called without throwing. */
+    public static boolean knowsXpSeed() {
+        return possibleXPSeeds.size() == 1;
+    }
+
     /**
      * Force the cracked table seed. Debug only: used by {@code /qedebug xpseed} to inspect what a
      * given seed would offer, or to recover a run whose seed is believed to be off by a known amount.
@@ -232,9 +237,22 @@ public class EnchantmentCracker {
     public static @Nullable BlockPos lecternPos = null;
     private static boolean doneEnchantment = false;
 
+    /**
+     * Forgets every piece of cracked-seed state. Called when a run proves the model wrong (an
+     * enchantment did not match the prediction): the table seed and the player seed are a matched
+     * pair, so keeping one without the other - or keeping both when they are simply wrong - would
+     * make the NEXT run throw items to a position that is wrong in exactly the same way.
+     *
+     * <p>Table and lectern positions are deliberately kept: they are not seed data, and the next
+     * right-click re-records them anyway.
+     */
     public static void resetCracker() {
         Configs.enchCrackState = CrackState.UNCRACKED;
         possibleXPSeeds.clear();
+        firstXpSeed = 0;
+        doneEnchantment = false;
+        // display-only: a stale expected count would show a bogus red "mismatch" in the HUD
+        expectedNumBookshelves = -1;
     }
 
     private static void prepareForNextEnchantmentSeedCrack(int serverReportedXPSeed) {
@@ -576,7 +594,7 @@ public class EnchantmentCracker {
                                     builder.append(Component.literal("|".repeat(filledWidth)).withColor(color));
                                     builder.append(Component.literal("|".repeat(unfilledWidth)).withColor(0xAAAAAA));
 
-                                    Minecraft.getInstance().gui.setOverlayMessage(builder, false);
+                                    me.tianhangj.quickenchant.util.Compat.setOverlayMessage(Minecraft.getInstance(), builder, 40);
                                 }
                             });
                         }
@@ -612,7 +630,6 @@ public class EnchantmentCracker {
                         @Override
                         public void run() {
                             if (Configs.enchCrackState == CrackState.CRACKED) {
-                                ChatComponent chat = Minecraft.getInstance().gui.getChat();
                                 ClientCommandHelper.sendFeedback(Component.translatable("enchCrack.insn.ready").withStyle(ChatFormatting.BOLD));
                                 ClientCommandHelper.sendFeedback("enchCrack.insn.bookshelves", finalResult.bookshelves);
                                 ClientCommandHelper.sendFeedback("enchCrack.insn.slot", finalResult.slot + 1);

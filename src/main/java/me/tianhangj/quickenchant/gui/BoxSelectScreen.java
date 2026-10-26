@@ -103,7 +103,7 @@ public class BoxSelectScreen extends Screen {
         me.tianhangj.quickenchant.config.FlowState.selectedBoxes.addAll(slots);
         me.tianhangj.quickenchant.config.FlowState.save();
         PrepareFlow.confirmBoxes(slots);
-        this.minecraft.setScreen(new EnchantSelectScreen(slots, null));
+        me.tianhangj.quickenchant.util.Compat.setScreen(this.minecraft, new EnchantSelectScreen(slots, null));
     }
 
     @Override
@@ -209,7 +209,7 @@ public class BoxSelectScreen extends Screen {
     public void onClose() {
         // closing without confirming simply cancels step 1; the HUD keeps hinting
         if (this.minecraft != null) {
-            this.minecraft.setScreen(null);
+            me.tianhangj.quickenchant.util.Compat.setScreen(this.minecraft, null);
         }
     }
 

@@ -1,0 +1,271 @@
+// =============================================================================
+// 多版本支持 —— 单一代码库 + 版本矩阵 + 生成式版本分叉
+//
+// 设计要点:
+//   1. 核心逻辑（RNG 破解、附魔求解、自动化状态机、GUI 等）只有一份，永不分叉。
+//   2. 版本差异被限制在 util/MultiVersionCompat.java 与 versioned/ 下少量外壳类中。
+//   3. 构建时用 -Pmc_ver=<26.1.2|26.2|26.3> 选择目标版本，
+//      由 gradle 任务把 src/versioned/<版本>/ 的内容叠加到主源码集之上。
+//   4. Fabric 的 //#if 注释指令不参与 —— 我们不用文本预处理,
+//      而是用「同名源文件覆盖」这一 Gradle 原生能力，零第三方依赖、IDE 也能正确索引。
+// =============================================================================
+
+// ---------- 版本矩阵 ----------
+def versionsFile = file('versions.properties')
+def versionMatrix = new Properties()
+if (versionsFile.exists()) {
+	versionsFile.withInputStream { versionMatrix.load(it) }
+}
+
+// 当前目标版本：-Pmc_ver 优先，否则回落到 gradle.properties 的 minecraft_version
+def mcVer = (project.findProperty('mc_ver') ?: project.minecraft_version).toString()
+def knownVersions = versionMatrix.stringPropertyNames()
+		.findAll { it.contains('.') && !it.startsWith('//') }
+		.collect { it.substring(0, it.lastIndexOf('.')) }
+		.unique()
+		.sort()
+
+if (versionsFile.exists() && !knownVersions.contains(mcVer)) {
+	throw new GradleException(
+			"未知的 mc_ver='${mcVer}'。可选: ${knownVersions.join(', ')}。请在 versions.properties 中登记该版本。")
+}
+
+// 从矩阵取值，缺省则回落到 gradle.properties 的同名属性
+def mcv = { String dep ->
+	versionMatrix.getProperty("${mcVer}.${dep}") ?: project.findProperty(dep == 'fabric_api' ? 'fabric_api_version' : "${dep}_version")
+}
+
+if (versionsFile.exists() && knownVersions.contains(mcVer)) {
+	ext.minecraft_version = mcv('minecraft')
+	ext.fabric_api_version = mcv('fabric_api')
+	ext.malilib_version = mcv('malilib')
+	ext.quickshulker_version = mcv('quickshulker')
+	// 运行时兼容下限。未在矩阵中登记时回落到编译版本（即维持旧行为）
+	ext.malilib_min_version = mcv('malilib_min') ?: ext.malilib_version
+} else {
+	ext.malilib_min_version = project.malilib_version
+}
+
+// 下限不能高于编译版本，否则产物会声明成自己都满足不了的约束。
+// 注意必须按数字段比较："0.28.9" 字符串比较会大于 "0.28.12"，但语义上更小。
+def versionParts = { String v -> v.tokenize('.-+').findAll { it.isInteger() }.collect { it.toInteger() } }
+def cmpVersion = { String a, String b ->
+	def pa = versionParts(a), pb = versionParts(b)
+	for (int i = 0; i < Math.max(pa.size(), pb.size()); i++) {
+		int x = i < pa.size() ? pa[i] : 0
+		int y = i < pb.size() ? pb[i] : 0
+		if (x != y) return x <=> y
+	}
+	return 0
+}
+if (cmpVersion(ext.malilib_min_version.toString(), ext.malilib_version.toString()) > 0) {
+	throw new GradleException(
+			"malilib_min (${ext.malilib_min_version}) 不能高于编译用的 malilib (${ext.malilib_version})")
+}
+logger.lifecycle("[multi-version] malilib 编译=${ext.malilib_version} 运行时下限>=${ext.malilib_min_version}")
+
+// 供源码使用的版本常量（编译期常量，mixin 与普通代码共用）
+def mcVerCode = mcVer.replaceAll(/[^0-9]/, '').padRight(4, '0').take(4).toInteger()
+
+// =============================================================================
+// 版本化源码叠加 —— 用 src/versioned/<mcVer>/ 中的同名文件替换 src/main/java 中的版本
+//
+// 注意：Gradle 的 sourceSets 是「叠加」而非「覆盖」，同一个类出现两份会编译报重复定义。
+// 因此这里先扫描版本化目录，把基础源码集里同路径的文件排除掉，实现真正的「覆盖」。
+// =============================================================================
+
+def overlayJavaDir = file("src/versioned/${mcVer}/java")
+def overlayResDir = file("src/versioned/${mcVer}/resources")
+
+// 收集需要被版本化目录遮蔽的相对路径
+def shadowedJava = []
+def shadowedRes = []
+if (overlayJavaDir.exists()) {
+	overlayJavaDir.eachFileRecurse { f ->
+		if (f.isFile()) {
+			shadowedJava << overlayJavaDir.toPath().relativize(f.toPath()).toString().replace('\\', '/')
+		}
+	}
+}
+if (overlayResDir.exists()) {
+	overlayResDir.eachFileRecurse { f ->
+		if (f.isFile()) {
+			shadowedRes << overlayResDir.toPath().relativize(f.toPath()).toString().replace('\\', '/')
+		}
+	}
+}
+
+if (!shadowedJava.isEmpty() || !shadowedRes.isEmpty()) {
+	logger.lifecycle("[multi-version] ${mcVer}: 遮蔽 ${shadowedJava.size()} 个 java 文件, ${shadowedRes.size()} 个资源文件")
+	shadowedJava.each { logger.lifecycle("  [shadow/java] ${it}") }
+	shadowedRes.each { logger.lifecycle("  [shadow/res ] ${it}") }
+}
+
+// =============================================================================
+// 版本化源码合并 —— 生成 build/generated/merged/{main,resources}
+//
+// Gradle 的 sourceSets 是「叠加」不是「覆盖」：基础目录与版本化目录若含同名文件，
+// 编译期会报重复定义。因此这里显式做一次「先铺底、后覆盖」的合并：
+//   1. 把 src/main/java 复制到 build/generated/merged/main
+//   2. 把 src/versioned/<mcVer>/java 覆盖上去（同名即替换）
+//   3. 编译只使用合并后的单一目录，语义与直觉完全一致
+// =============================================================================
+
+def mergedMainDir = layout.buildDirectory.dir("generated/merged/${mcVer}/main")
+def mergedResDir = layout.buildDirectory.dir("generated/merged/${mcVer}/resources")
+
+// =============================================================================
+// 版本化的「排除」—— 某些文件在目标版本上根本无法存在，需要从基础源码里剔除。
+//
+// 与「覆盖」不同，排除后没有替代文件：这类 mixin 注入的类在目标版本已删除，
+// 且其功能已被别的 mixin 覆盖，保留只会导致编译失败或运行期注入崩溃。
+// 清单写在 src/versioned/<mcVer>/exclude.txt，每行一个相对 src/main/java 的路径。
+// =============================================================================
+
+def excludeFile = file("src/versioned/${mcVer}/exclude.txt")
+def excludedJava = []
+if (excludeFile.exists()) {
+	excludeFile.eachLine('UTF-8') { line ->
+		def p = line.trim()
+		if (p && !p.startsWith('#')) {
+			excludedJava << p
+		}
+	}
+}
+if (!excludedJava.isEmpty()) {
+	logger.lifecycle("[multi-version] ${mcVer}: 排除 ${excludedJava.size()} 个基础源码文件")
+	excludedJava.each { logger.lifecycle("  [exclude    ] ${it}") }
+}
+
+// 用两个串行 Copy 任务实现确定性的「先铺底、后覆盖」。
+// 目标目录按版本区分，切换 -Pmc_ver 不会互相污染。
+//
+// 注意：Copy 任务只增不删，被 exclude 掉的文件若上次构建残留在目录里不会自动消失，
+// 会导致「以为排除了、实际还在」。因此每次先清空目标目录，保证结果与输入严格一致。
+def copyBaseSources = tasks.register('copyBaseSources', Copy) {
+	group = 'multi-version'
+	inputs.files('src/main/java')
+	inputs.property('excluded', excludedJava.join('\n'))
+	doFirst {
+		delete(mergedMainDir)
+	}
+	into mergedMainDir
+	from('src/main/java')
+	excludedJava.each { exclude(it) }
+}
+
+def overlayVersionSources = tasks.register('overlayVersionSources', Copy) {
+	group = 'multi-version'
+	description = "用 src/versioned/${mcVer}/java 覆盖基础源码中的同名文件"
+	into mergedMainDir
+	dependsOn copyBaseSources
+	if (overlayJavaDir.exists()) {
+		from(overlayJavaDir)
+	}
+}
+
+def copyBaseResources = tasks.register('copyBaseResources', Copy) {
+	group = 'multi-version'
+	inputs.files('src/main/resources')
+	doFirst {
+		delete(mergedResDir)
+	}
+	into mergedResDir
+	from('src/main/resources')
+}
+
+def overlayVersionResources = tasks.register('overlayVersionResources', Copy) {
+	group = 'multi-version'
+	into mergedResDir
+	dependsOn copyBaseResources
+	if (overlayResDir.exists()) {
+		from(overlayResDir)
+	}
+}
+
+if (!shadowedJava.isEmpty() || !shadowedRes.isEmpty()) {
+	logger.lifecycle("[multi-version] ${mcVer}: 版本化覆盖 ${shadowedJava.size()} 个 java, ${shadowedRes.size()} 个资源")
+	shadowedJava.each { logger.lifecycle("  [overlay/java] ${it}") }
+	shadowedRes.each { logger.lifecycle("  [overlay/res ] ${it}") }
+}
+
+// accessWidener 同样需要按版本选择（26.2 起 overlayMessageTime 从 Gui 搬到 Hud）
+def versionedAw = file("src/versioned/${mcVer}/resources/quick-enchant.aw")
+ext.qeAccessWidenerFile = versionedAw.exists() ? versionedAw : file('src/main/resources/quick-enchant.aw')
+logger.lifecycle("[multi-version] accessWidener = ${project.ext.qeAccessWidenerFile}")
+
+sourceSets {
+	main {
+		java {
+			srcDirs = [mergedMainDir.get().asFile]
+		}
+		resources {
+			srcDirs = [mergedResDir.get().asFile]
+		}
+	}
+}
+
+tasks.named('compileJava') { dependsOn overlayVersionSources }
+tasks.named('processResources') { dependsOn overlayVersionResources }
+
+// 生成编译期版本常量，供 MultiVersionCompat / mixin 判定使用
+def genVersionDir = layout.buildDirectory.dir("generated/version-constants").get().asFile
+def genVersionTask = tasks.register('generateVersionConstants') {
+	outputs.dir(genVersionDir)
+	// 版本号参与输入，切换 -Pmc_ver 时自动重新生成
+	inputs.property('mcVer', mcVer)
+	inputs.property('mcVerCode', mcVerCode)
+	doLast {
+		def outDir = new File(genVersionDir, 'me/tianhangj/quickenchant/util')
+		outDir.mkdirs()
+		new File(outDir, 'QEMcVersion.java').setText("""\
+package me.tianhangj.quickenchant.util;
+
+/**
+ * Auto-generated by the Gradle task generateVersionConstants. Do not edit.
+ * Values are compile-time constants, usable from mixin annotations and normal code alike.
+ */
+public final class QEMcVersion {
+    private QEMcVersion() {
+    }
+
+    /** Target Minecraft version string, e.g. "26.1.2". */
+    public static final String MC_VERSION = "${mcVer}";
+
+    /** Normalised version code: 26.1.2 -> 2601, 26.2 -> 2602, 26.3 -> 2603. */
+    public static final int MC_VERSION_CODE = ${mcVerCode};
+
+    public static final int MC_26_1 = 2601;
+    public static final int MC_26_2 = 2602;
+    public static final int MC_26_3 = 2603;
+
+    /** Whether this build targets 26.2 or newer. */
+    public static final boolean AT_LEAST_26_2 = MC_VERSION_CODE >= MC_26_2;
+    /** Whether this build targets 26.3 or newer. */
+    public static final boolean AT_LEAST_26_3 = MC_VERSION_CODE >= MC_26_3;
+}
+""", 'UTF-8')
+	}
+}
+
+sourceSets.main.java.srcDir(genVersionDir)
+tasks.named('compileJava') { dependsOn genVersionTask }
+
+// sourcesJar 也读取合并后的源码目录与生成的版本常量，需要显式声明依赖。
+// 用 configureEach 延迟绑定：本脚本在 build.gradle 早期 apply，此时 sourcesJar 尚未注册。
+tasks.matching { it.name == 'sourcesJar' }.configureEach {
+	dependsOn overlayVersionSources, genVersionTask, overlayVersionResources
+}
+
+// =============================================================================
+// 辅助任务：一次构建全部版本
+// =============================================================================
+tasks.register('buildAllVersions') {
+	group = 'build'
+	description = '依次为 versions.properties 中登记的每个 MC 版本构建一个独立 jar'
+	doLast {
+		println "可用版本: ${knownVersions.join(', ')}"
+		println "请分别执行（每个版本一个产物）:"
+		knownVersions.each { v -> println "  ./gradlew build -Pmc_ver=${v}" }
+	}
+}

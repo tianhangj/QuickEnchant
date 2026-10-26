@@ -18,16 +18,26 @@ RNG 破解与预测核心移植自 [clientcommands](https://github.com/Earthcomp
 3. **破解随机数** — 右上角常驻状态与提示：
    - 使用 `/qecrackrng` 破解玩家随机数（扔 10 个物品）；
    - 在附魔台**附魔任意物品**一次，破解附魔种子。
-4. **/qestart** — 开始自动附魔：取物 → 扔白名单物品 → 讲台调书架 → dummy/真实附魔（全程三重校验）→ 放回原盒 → 下一件。求解器带**单步前瞻**：本件真实附魔前在窗口内多扔 m 个物品，使写入的下一件种子直接命中其目标，除第一件外通常全程零 dummy、零额外扔物。
+4. **/qestart** — 开始自动附魔：取物 → 扔白名单物品 → 讲台调书架 → dummy/真实附魔（全程三重校验）→ 放回原盒 → 下一件。求解器按**种子链**工作：只有第一件需要一次 dummy（建立链条），之后每件只需在附魔前扔白名单物品把玩家随机数推到"本次附魔恰好写出下一件所需种子"的位置，**全程不再使用 dummy**。
 5. 中止快捷键随时可停；校验不符立即终止并本地聊天警告；未正常结束时下次 /qeprepare 继承盒选择，附魔选择按物品 id 永久保留。
 
 ## 构建
 
 ```
-gradlew build
+gradlew build -Pmc_ver=26.1.2
 ```
 
-每次构建自动产出 `1.2.0-dev.N` 版本（N 从 `dev-build-number.txt` 读取并在构建成功后自动 +1），用于区分不同构建的 jar。`gradle.properties` 中 `version` 为基础版本号，`org.gradle.java.home` 指向本机 JDK 25（其他机器需相应修改）。
+版本号取自 `gradle.properties` 的 `version`，产物名再附加目标 MC 版本，例如 `quick-enchant-1.3.0+mc26.1.2.jar`。
+
+支持多版本：
+
+```
+gradlew build -Pmc_ver=26.1.2   # → 1.3.0+mc26.1.2
+gradlew build -Pmc_ver=26.2     # → 1.3.0+mc26.2
+gradlew build -Pmc_ver=26.3     # → 1.3.0+mc26.3
+```
+
+详见 [docs/multi-version.md](docs/multi-version.md)。`org.gradle.java.home` 指向本机 JDK 25（其他机器需相应修改）。
 
 ## License
 
